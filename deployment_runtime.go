@@ -32,9 +32,7 @@ func (a *App) runDeployment(id string) {
 	cfg := a.currentConfig()
 	if dep.ProjectID != "" {
 		if p, exists := findProjectByID(cfg.Projects, dep.ProjectID); exists {
-			if dep.ServiceName == "" {
-				dep.ServiceName = p.ServiceName
-			}
+			dep.ServiceName = p.ServiceName
 			if dep.TargetDir == "" {
 				dep.TargetDir = p.TargetDir
 			}
@@ -46,11 +44,8 @@ func (a *App) runDeployment(id string) {
 			}
 		}
 	}
-	if dep.ServiceName == "" || dep.TargetDir == "" {
+	if dep.TargetDir == "" {
 		dp := getDefaultProject(cfg)
-		if dep.ServiceName == "" {
-			dep.ServiceName = dp.ServiceName
-		}
 		if dep.TargetDir == "" {
 			dep.TargetDir = dp.TargetDir
 		}
@@ -120,19 +115,26 @@ func (a *App) runDeployment(id string) {
 		return
 	}
 
-	a.publish(id, "info", "停止服务: %s", dep.ServiceName)
-	if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
-		finish("failed", fmt.Errorf("停止服务失败: %w", err), nil, backupPath)
-		a.publish(id, "error", "停止服务失败: %v", err)
-		return
+	serviceManaged := dep.ServiceName != ""
+	if serviceManaged {
+		a.publish(id, "info", "停止服务: %s", dep.ServiceName)
+		if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
+			finish("failed", fmt.Errorf("停止服务失败: %w", err), nil, backupPath)
+			a.publish(id, "error", "停止服务失败: %v", err)
+			return
+		}
+		a.publish(id, "info", "服务已停止")
+	} else {
+		a.publish(id, "warn", "service_name 为空，跳过停止服务，直接替换文件")
 	}
-	a.publish(id, "info", "服务已停止")
 
 	a.publish(id, "info", "开始替换文件")
 	changed, err := syncDirectories(extractDir, dep.TargetDir, replaceIgnore)
 	if err != nil {
-		if restartErr := startService(dep.ServiceName, 45*time.Second); restartErr != nil {
-			err = fmt.Errorf("%v; 尝试恢复启动服务失败: %v", err, restartErr)
+		if serviceManaged {
+			if restartErr := startService(dep.ServiceName, 45*time.Second); restartErr != nil {
+				err = fmt.Errorf("%v; 尝试恢复启动服务失败: %v", err, restartErr)
+			}
 		}
 		finish("failed", fmt.Errorf("替换文件失败: %w", err), nil, backupPath)
 		a.publish(id, "error", "替换文件失败: %v", err)
@@ -140,11 +142,15 @@ func (a *App) runDeployment(id string) {
 	}
 	a.publish(id, "info", "文件替换完成，变更文件数: %d", len(changed))
 
-	a.publish(id, "info", "启动服务: %s", dep.ServiceName)
-	if err := startService(dep.ServiceName, 45*time.Second); err != nil {
-		finish("failed", fmt.Errorf("启动服务失败: %w", err), changed, backupPath)
-		a.publish(id, "error", "启动服务失败: %v", err)
-		return
+	if serviceManaged {
+		a.publish(id, "info", "启动服务: %s", dep.ServiceName)
+		if err := startService(dep.ServiceName, 45*time.Second); err != nil {
+			finish("failed", fmt.Errorf("启动服务失败: %w", err), changed, backupPath)
+			a.publish(id, "error", "启动服务失败: %v", err)
+			return
+		}
+	} else {
+		a.publish(id, "warn", "service_name 为空，跳过启动服务")
 	}
 
 	if dep.Version != "" {
@@ -215,9 +221,7 @@ func (a *App) runRollback(id, sourceID string) {
 	if dep.BackupFile == "" {
 		dep.BackupFile = source.BackupFile
 	}
-	if dep.ServiceName == "" {
-		dep.ServiceName = source.ServiceName
-	}
+	dep.ServiceName = source.ServiceName
 	if dep.TargetDir == "" {
 		dep.TargetDir = source.TargetDir
 	}
@@ -241,16 +245,24 @@ func (a *App) runRollback(id, sourceID string) {
 	}
 	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
 	a.publish(id, "info", "回滚开始，目标记录: %s", sourceID)
-	a.publish(id, "info", "停止服务: %s", dep.ServiceName)
-	if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
-		finish("failed", fmt.Errorf("停止服务失败: %w", err))
-		a.publish(id, "error", "停止服务失败: %v", err)
-		return
+
+	serviceManaged := dep.ServiceName != ""
+	if serviceManaged {
+		a.publish(id, "info", "停止服务: %s", dep.ServiceName)
+		if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
+			finish("failed", fmt.Errorf("停止服务失败: %w", err))
+			a.publish(id, "error", "停止服务失败: %v", err)
+			return
+		}
+	} else {
+		a.publish(id, "warn", "service_name 为空，跳过停止服务，直接回滚文件")
 	}
 
 	a.publish(id, "info", "清理目标目录（保留忽略项）")
 	if err := clearDirWithIgnore(dep.TargetDir, replaceIgnore); err != nil {
-		_ = startService(dep.ServiceName, 45*time.Second)
+		if serviceManaged {
+			_ = startService(dep.ServiceName, 45*time.Second)
+		}
 		finish("failed", fmt.Errorf("清理目标目录失败: %w", err))
 		a.publish(id, "error", "清理目标目录失败: %v", err)
 		return
@@ -258,17 +270,25 @@ func (a *App) runRollback(id, sourceID string) {
 
 	a.publish(id, "info", "恢复备份包: %s", dep.BackupFile)
 	if err := extractZip(dep.BackupFile, dep.TargetDir); err != nil {
-		_ = startService(dep.ServiceName, 45*time.Second)
+		if serviceManaged {
+			if restartErr := startService(dep.ServiceName, 45*time.Second); restartErr != nil {
+				err = fmt.Errorf("%v; 尝试恢复启动服务失败: %v", err, restartErr)
+			}
+		}
 		finish("failed", fmt.Errorf("恢复备份失败: %w", err))
 		a.publish(id, "error", "恢复备份失败: %v", err)
 		return
 	}
 
-	a.publish(id, "info", "启动服务: %s", dep.ServiceName)
-	if err := startService(dep.ServiceName, 45*time.Second); err != nil {
-		finish("failed", fmt.Errorf("启动服务失败: %w", err))
-		a.publish(id, "error", "启动服务失败: %v", err)
-		return
+	if serviceManaged {
+		a.publish(id, "info", "启动服务: %s", dep.ServiceName)
+		if err := startService(dep.ServiceName, 45*time.Second); err != nil {
+			finish("failed", fmt.Errorf("启动服务失败: %w", err))
+			a.publish(id, "error", "启动服务失败: %v", err)
+			return
+		}
+	} else {
+		a.publish(id, "warn", "service_name 为空，跳过启动服务")
 	}
 
 	if source.Version != "" {

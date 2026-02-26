@@ -1,3 +1,5 @@
+<div id="deployments-page-meta" data-offset="{{.Offset}}" data-limit="{{.Limit}}" data-total="{{.Total}}"></div>
+
 {{if .Deployments}}
 <div class="overflow-auto">
   <table class="w-full text-sm min-w-[960px]">
@@ -17,47 +19,81 @@
         <th class="px-3 py-2">操作</th>
       </tr>
     </thead>
-    <tbody>
-      {{range .Deployments}}
-      <tr class="border-b align-top hover:bg-slate-50/50">
-        <td class="px-3 py-2 font-mono text-xs">{{.ID}}</td>
-        <td class="px-3 py-2 text-xs">{{if .ProjectName}}{{.ProjectName}}{{else if .ProjectID}}{{.ProjectID}}{{else}}-{{end}}</td>
-        <td class="px-3 py-2">{{.Type}}{{if .RollbackOf}}<span class="text-xs text-slate-500"> ({{.RollbackOf}})</span>{{end}}</td>
-        <td class="px-3 py-2 font-mono text-xs">{{if .Version}}{{.Version}}{{else}}-{{end}}</td>
-        <td class="px-3 py-2"><span class="{{statusClass .Status}} font-medium">{{.Status}}</span></td>
-        <td class="px-3 py-2 text-xs text-slate-600">
-          <div>创建: {{fmtTime .CreatedAt}}</div>
-          <div>完成: {{fmtMaybeTime .FinishedAt}}</div>
-        </td>
-        <td class="px-3 py-2">{{fmtMs .DurationMs}}</td>
-        <td class="px-3 py-2">{{.LoginIP}}</td>
-        <td class="px-3 py-2 text-xs space-y-1">
-          <div>{{changedSummary .Changed}}</div>
-          <div class="text-slate-500">替换忽略: {{len .ReplaceIgnore}} 条</div>
-          <button onclick="window.updaterShowChanges('{{.ID}}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">查看明细</button>
-        </td>
-        <td class="px-3 py-2">
-          <form hx-post="/api/deployments/{{.ID}}/note" hx-target="#deployments-container" hx-swap="innerHTML" class="flex gap-2">
-            <input name="note" value="{{.Note}}" class="border border-slate-300 rounded px-2 py-1 w-64 text-xs" />
-            <button class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">保存</button>
-          </form>
-        </td>
-        <td class="px-3 py-2 text-xs text-rose-700 max-w-[240px] break-all">{{shortError .Error}}</td>
-        <td class="px-3 py-2">
-          <div class="flex flex-col gap-2">
-            <button onclick="window.updaterViewLogs('{{.ID}}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">查看日志</button>
-            {{if and (eq .Type "deploy") (eq .Status "success")}}
-            <form hx-post="/api/deployments/{{.ID}}/rollback" hx-confirm="确认回滚到该版本？" hx-target="#deployments-container" hx-swap="innerHTML">
-              <button class="text-xs px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-500">回滚</button>
-            </form>
-            {{end}}
-          </div>
-        </td>
-      </tr>
-      {{end}}
+    <tbody id="deployments-tbody">
+      {{template "deployments_rows" .}}
     </tbody>
   </table>
 </div>
 {{else}}
-<div class="text-sm text-slate-500 p-3 border border-dashed rounded">暂无部署记录</div>
+  {{if eq .Offset 0}}
+  <div class="text-sm text-slate-500 p-3 border border-dashed rounded">暂无部署记录</div>
+  {{end}}
+{{end}}
+
+<div id="deployments-load-more-wrap" class="mt-3">
+  {{template "deployments_more" .}}
+</div>
+
+{{define "deployments_rows"}}
+{{range .Deployments}}
+<tr class="border-b align-top hover:bg-slate-50/50">
+  <td class="px-3 py-2 font-mono text-xs">{{.ID}}</td>
+  <td class="px-3 py-2 text-xs">{{if .ProjectName}}{{.ProjectName}}{{else if .ProjectID}}{{.ProjectID}}{{else}}-{{end}}</td>
+  <td class="px-3 py-2">{{.Type}}{{if .RollbackOf}}<span class="text-xs text-slate-500"> ({{.RollbackOf}})</span>{{end}}</td>
+  <td class="px-3 py-2 font-mono text-xs">{{if .Version}}{{.Version}}{{else}}-{{end}}</td>
+  <td class="px-3 py-2"><span class="{{statusClass .Status}} font-medium">{{.Status}}</span></td>
+  <td class="px-3 py-2 text-xs text-slate-600">
+    <div>创建: {{fmtTime .CreatedAt}}</div>
+    <div>完成: {{fmtMaybeTime .FinishedAt}}</div>
+  </td>
+  <td class="px-3 py-2">{{fmtMs .DurationMs}}</td>
+  <td class="px-3 py-2">{{.LoginIP}}</td>
+  <td class="px-3 py-2 text-xs space-y-1">
+    <div>{{changedSummary .Changed}}</div>
+    <div class="text-slate-500">替换忽略: {{len .ReplaceIgnore}} 条</div>
+    <button onclick="window.updaterShowChanges('{{.ID}}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">查看明细</button>
+  </td>
+  <td class="px-3 py-2">
+    <form hx-post="/api/deployments/{{.ID}}/note" hx-target="#deployments-container" hx-swap="innerHTML" class="flex gap-2">
+      <input name="note" value="{{.Note}}" class="border border-slate-300 rounded px-2 py-1 w-64 text-xs" />
+      <button class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">保存</button>
+    </form>
+  </td>
+  <td class="px-3 py-2 text-xs text-rose-700 max-w-[240px] break-all">{{shortError .Error}}</td>
+  <td class="px-3 py-2">
+    <div class="flex flex-col gap-2">
+      <button onclick="window.updaterViewLogs('{{.ID}}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">查看日志</button>
+      {{if and (eq .Type "deploy") (eq .Status "success")}}
+      <form hx-post="/api/deployments/{{.ID}}/rollback" hx-confirm="确认回滚到该版本？" hx-target="#deployments-container" hx-swap="innerHTML">
+        <button class="text-xs px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-500">回滚</button>
+      </form>
+      {{end}}
+    </div>
+  </td>
+</tr>
+{{end}}
+{{end}}
+
+{{define "deployments_more"}}
+{{if gt .Total 0}}
+<div class="flex items-center justify-between gap-3">
+  <span class="text-xs text-slate-500">已加载 {{.NextOffset}} / {{.Total}} 条</span>
+  {{if .HasMore}}
+  <button
+    hx-get="/partials/deployments/rows?offset={{.NextOffset}}&limit={{.Limit}}"
+    hx-target="#deployments-tbody"
+    hx-swap="beforeend"
+    class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-100">加载更多</button>
+  {{else}}
+  <span class="text-xs text-slate-500">已全部加载</span>
+  {{end}}
+</div>
+{{end}}
+{{end}}
+
+{{define "deployments_rows_fragment"}}
+{{template "deployments_rows" .}}
+<div id="deployments-load-more-wrap" class="mt-3" hx-swap-oob="outerHTML">
+  {{template "deployments_more" .}}
+</div>
 {{end}}

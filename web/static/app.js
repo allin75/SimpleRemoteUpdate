@@ -6,13 +6,31 @@
   const logPanel = document.getElementById("log-panel");
   const logDeploymentId = document.getElementById("log-deployment-id");
   const deploymentsContainer = document.getElementById("deployments-container");
-  const configForm = document.getElementById("config-form");
-  const configMessage = document.getElementById("config-message");
   const runtimeSummary = document.getElementById("runtime-summary");
   const maxUploadLabel = document.getElementById("max-upload-label");
   const projectSelect = document.getElementById("project-select");
   const targetVersionInput = document.getElementById("target-version-input");
   const nextVersionLabel = document.getElementById("next-version-label");
+
+  const projectSidebar = document.getElementById("project-sidebar");
+  const activeProjectTitle = document.getElementById("active-project-title");
+  const addProjectBtn = document.getElementById("add-project-btn");
+  const deleteProjectBtn = document.getElementById("delete-project-btn");
+  const projectForm = document.getElementById("project-form");
+  const projectMessage = document.getElementById("project-message");
+
+  const systemForm = document.getElementById("system-form");
+  const systemMessage = document.getElementById("system-message");
+  const defaultProjectSelect = document.getElementById("default-project-select");
+  const openSystemConfigBtn = document.getElementById("open-system-config-btn");
+  const systemConfigDialog = document.getElementById("system-config-dialog");
+  const systemConfigClose = document.getElementById("system-config-close");
+
+  const projectCreateDialog = document.getElementById("project-create-dialog");
+  const projectCreateForm = document.getElementById("project-create-form");
+  const projectCreateCancel = document.getElementById("project-create-cancel");
+  const projectCreateMessage = document.getElementById("project-create-message");
+
   const changesDialog = document.getElementById("changes-dialog");
   const changesDialogTitle = document.getElementById("changes-dialog-title");
   const changesDialogSubtitle = document.getElementById("changes-dialog-subtitle");
@@ -21,51 +39,42 @@
   const changesDialogClose = document.getElementById("changes-dialog-close");
 
   let eventSource = null;
+  let configCache = null;
   let projectsCache = [];
+  let activeProjectId = "";
 
-  function setConfigMessage(text) {
-    if (configMessage) configMessage.textContent = text;
+  function setText(el, text) {
+    if (el) el.textContent = text;
   }
 
-  function syncRuntimeMeta(cfg, selectedProject = null) {
-    const p = selectedProject || getSelectedProject() || null;
-    const serviceName = p?.service_name || cfg.service_name || "-";
-    const targetDir = p?.target_dir || cfg.target_dir || "-";
-    const currentVersion = p?.current_version || cfg.current_version || "-";
-    const maxUpload = p?.max_upload_mb || cfg.max_upload_mb || "-";
-    if (runtimeSummary) {
-      runtimeSummary.textContent = `服务: ${serviceName} | 目录: ${targetDir} | 当前版本: ${currentVersion}`;
-    }
-    if (maxUploadLabel) {
-      maxUploadLabel.textContent = maxUpload;
-    }
-    if (nextVersionLabel) {
-      nextVersionLabel.textContent = `默认下一版本: ${nextPatchVersion(currentVersion || "0.0.1")}`;
-    }
-    if (targetVersionInput) {
-      targetVersionInput.placeholder = `留空自动递增为 ${nextPatchVersion(currentVersion || "0.0.1")}`;
+  function setSystemMessage(text) {
+    setText(systemMessage, text);
+  }
+
+  function setProjectMessage(text) {
+    setText(projectMessage, text);
+  }
+
+  function setCreateMessage(text) {
+    setText(projectCreateMessage, text);
+  }
+
+  function openDialog(dialogEl) {
+    if (!dialogEl) return;
+    if (typeof dialogEl.showModal === "function") {
+      dialogEl.showModal();
+    } else {
+      dialogEl.setAttribute("open", "open");
     }
   }
 
-  function getSelectedProject() {
-    if (!projectSelect || projectsCache.length === 0) return null;
-    const id = `${projectSelect.value || ""}`.trim();
-    return projectsCache.find((p) => p.id === id) || projectsCache[0] || null;
-  }
-
-  function renderProjectSelect(projects, defaultProjectId) {
-    projectsCache = Array.isArray(projects) ? projects : [];
-    if (!projectSelect) return;
-    projectSelect.innerHTML = "";
-    projectsCache.forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = p.id;
-      opt.textContent = `${p.name || p.id} (${p.service_name || "-"})`;
-      projectSelect.appendChild(opt);
-    });
-    if (projectsCache.length === 0) return;
-    const exists = projectsCache.some((p) => p.id === defaultProjectId);
-    projectSelect.value = exists ? defaultProjectId : projectsCache[0].id;
+  function closeDialog(dialogEl) {
+    if (!dialogEl) return;
+    if (typeof dialogEl.close === "function") {
+      dialogEl.close();
+    } else {
+      dialogEl.removeAttribute("open");
+    }
   }
 
   function isValidVersion(version) {
@@ -100,6 +109,7 @@
   }
 
   function appendLog(text, level = "info") {
+    if (!logPanel) return;
     const line = document.createElement("div");
     const levelClass =
       level === "error" ? "text-rose-300" : level === "warn" ? "text-amber-300" : "text-emerald-300";
@@ -110,9 +120,194 @@
   }
 
   function setProgress(percent) {
+    if (!progressBar || !progressLabel) return;
     const p = Math.max(0, Math.min(100, Math.floor(percent)));
     progressBar.style.width = `${p}%`;
     progressLabel.textContent = `${p}%`;
+  }
+
+  function getProjectByID(id) {
+    const pid = `${id || ""}`.trim();
+    if (!pid) return null;
+    return projectsCache.find((p) => p.id === pid) || null;
+  }
+
+  function getActiveProject() {
+    if (activeProjectId) {
+      const p = getProjectByID(activeProjectId);
+      if (p) return p;
+    }
+    if (projectsCache.length > 0) return projectsCache[0];
+    return null;
+  }
+
+  function syncRuntimeMeta(project) {
+    const p = project || getActiveProject();
+    const serviceName = p?.service_name || "-";
+    const targetDir = p?.target_dir || "-";
+    const currentVersion = p?.current_version || "-";
+    const maxUpload = p?.max_upload_mb || "-";
+    setText(runtimeSummary, `服务: ${serviceName} | 目录: ${targetDir} | 当前版本: ${currentVersion}`);
+    setText(maxUploadLabel, maxUpload);
+    setText(nextVersionLabel, `默认下一版本: ${nextPatchVersion(currentVersion || "0.0.1")}`);
+    if (targetVersionInput) {
+      targetVersionInput.placeholder = `留空自动递增为 ${nextPatchVersion(currentVersion || "0.0.1")}`;
+    }
+  }
+
+  function renderUploadProjectSelect(projects, selectedID) {
+    if (!projectSelect) return;
+    projectSelect.innerHTML = "";
+    projects.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = `${p.name || p.id} (${p.service_name || "-"})`;
+      projectSelect.appendChild(opt);
+    });
+    if (projects.length === 0) return;
+    const exists = projects.some((p) => p.id === selectedID);
+    projectSelect.value = exists ? selectedID : projects[0].id;
+  }
+
+  function renderDefaultProjectSelect(projects, defaultProjectID) {
+    if (!defaultProjectSelect) return;
+    defaultProjectSelect.innerHTML = "";
+    projects.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = `${p.name || p.id} (${p.id})`;
+      defaultProjectSelect.appendChild(opt);
+    });
+    if (projects.length === 0) return;
+    const exists = projects.some((p) => p.id === defaultProjectID);
+    defaultProjectSelect.value = exists ? defaultProjectID : projects[0].id;
+  }
+
+  function renderSidebar(projects, defaultProjectID) {
+    if (!projectSidebar) return;
+    projectSidebar.innerHTML = "";
+    if (projects.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "text-xs text-slate-500";
+      empty.textContent = "暂无程序";
+      projectSidebar.appendChild(empty);
+      return;
+    }
+    projects.forEach((p) => {
+      const isActive = p.id === activeProjectId;
+      const isDefault = p.id === defaultProjectID;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `w-full text-left rounded-lg border px-3 py-2 transition ${
+        isActive ? "border-sky-400 bg-sky-50/10" : "border-slate-300 hover:bg-slate-50/10"
+      }`;
+      btn.dataset.projectId = p.id;
+      btn.innerHTML = `
+        <div class="flex items-center justify-between gap-2">
+          <span class="font-medium text-sm">${p.name || p.id}</span>
+          ${isDefault ? '<span class="text-[10px] px-1.5 py-0.5 rounded border border-emerald-400 text-emerald-700">默认</span>' : ""}
+        </div>
+        <div class="mt-1 text-xs text-slate-500 font-mono break-all">${p.id}</div>
+        <div class="mt-1 text-xs text-slate-500 break-all">版本: ${p.current_version || "-"} | 服务: ${p.service_name || "-"}</div>
+      `;
+      btn.addEventListener("click", () => selectProject(p.id));
+      projectSidebar.appendChild(btn);
+    });
+  }
+
+  function fillProjectForm(project) {
+    if (!projectForm) return;
+    const map = {
+      project_id: project?.id || "",
+      name: project?.name || "",
+      current_version: project?.current_version || "",
+      service_name: project?.service_name || "",
+      target_dir: project?.target_dir || "",
+      max_upload_mb: project?.max_upload_mb || "",
+      backup_ignore_text: Array.isArray(project?.backup_ignore) ? project.backup_ignore.join("\n") : "",
+      replace_ignore_text: Array.isArray(project?.replace_ignore) ? project.replace_ignore.join("\n") : "",
+    };
+    Object.keys(map).forEach((k) => {
+      const input = projectForm.elements.namedItem(k);
+      if (input) input.value = map[k];
+    });
+    const setDefaultInput = projectForm.elements.namedItem("set_default_project");
+    if (setDefaultInput) {
+      setDefaultInput.checked = configCache?.default_project_id === project?.id;
+    }
+    const title = project ? `当前程序: ${project.name || project.id} (${project.id})` : "未选择程序";
+    setText(activeProjectTitle, title);
+  }
+
+  function fillSystemForm(cfg) {
+    if (!systemForm) return;
+    const map = {
+      listen_addr: cfg.listen_addr || "",
+      session_cookie: cfg.session_cookie || "",
+      upload_dir: cfg.upload_dir || "",
+      work_dir: cfg.work_dir || "",
+      backup_dir: cfg.backup_dir || "",
+      deployments_file: cfg.deployments_file || "",
+      log_file: cfg.log_file || "",
+    };
+    Object.keys(map).forEach((k) => {
+      const input = systemForm.elements.namedItem(k);
+      if (input) input.value = map[k];
+    });
+    const keyInput = systemForm.elements.namedItem("new_auth_key");
+    if (keyInput) keyInput.value = "";
+  }
+
+  function selectProject(projectID, options = {}) {
+    const { syncUpload = true } = options;
+    const project = getProjectByID(projectID) || projectsCache[0] || null;
+    if (!project) {
+      activeProjectId = "";
+      fillProjectForm(null);
+      syncRuntimeMeta(null);
+      return;
+    }
+    activeProjectId = project.id;
+    fillProjectForm(project);
+    syncRuntimeMeta(project);
+    renderSidebar(projectsCache, configCache?.default_project_id || "");
+    if (syncUpload && projectSelect) {
+      projectSelect.value = project.id;
+    }
+  }
+
+  function normalizeConfigPayload(payload) {
+    if (payload && payload.config && payload.config.projects) return payload.config;
+    return payload;
+  }
+
+  async function loadConfig(preferredProjectID = "", silent = false) {
+    try {
+      const res = await fetch("/api/config", { credentials: "same-origin" });
+      if (!res.ok) {
+        setSystemMessage(`读取配置失败 (${res.status})`);
+        return;
+      }
+      const payload = await res.json();
+      const cfg = normalizeConfigPayload(payload);
+      configCache = cfg || {};
+      projectsCache = Array.isArray(cfg?.projects) ? cfg.projects : [];
+      fillSystemForm(configCache);
+      renderDefaultProjectSelect(projectsCache, configCache.default_project_id);
+      const candidateID =
+        `${preferredProjectID || ""}`.trim() ||
+        `${activeProjectId || ""}`.trim() ||
+        `${configCache.default_project_id || ""}`.trim() ||
+        (projectsCache[0] ? projectsCache[0].id : "");
+      renderUploadProjectSelect(projectsCache, candidateID);
+      selectProject(candidateID, { syncUpload: false });
+      if (!silent) {
+        setSystemMessage("配置已加载");
+        setProjectMessage("配置已加载");
+      }
+    } catch (_e) {
+      setSystemMessage("读取配置失败");
+    }
   }
 
   function connectLogs(id) {
@@ -121,8 +316,9 @@
       eventSource.close();
       eventSource = null;
     }
+    if (!logPanel) return;
     logPanel.innerHTML = "";
-    logDeploymentId.textContent = `当前日志: ${id}`;
+    setText(logDeploymentId, `当前日志: ${id}`);
     appendLog(`[${new Date().toLocaleTimeString()}] 连接日志流...`);
     eventSource = new EventSource(`/api/deployments/${id}/events`);
     eventSource.onmessage = (e) => {
@@ -139,38 +335,15 @@
   }
 
   async function refreshDeployments() {
+    if (!deploymentsContainer) return;
+    const pageMeta = document.getElementById("deployments-page-meta");
+    const limitRaw = Number(pageMeta?.dataset?.limit || 20);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 20;
     try {
-      const res = await fetch("/partials/deployments", { credentials: "same-origin" });
+      const res = await fetch(`/partials/deployments?offset=0&limit=${limit}`, { credentials: "same-origin" });
       if (!res.ok) return;
       deploymentsContainer.innerHTML = await res.text();
     } catch (_e) {}
-  }
-
-  async function loadConfig() {
-    if (!configForm) return;
-    try {
-      const res = await fetch("/api/config", { credentials: "same-origin" });
-      if (!res.ok) {
-        setConfigMessage("读取配置失败");
-        return;
-      }
-      const cfg = await res.json();
-      Object.keys(cfg).forEach((k) => {
-        const input = configForm.elements.namedItem(k);
-        if (input) input.value = cfg[k] ?? "";
-      });
-      if (configForm) {
-        const projectsEditor = configForm.elements.namedItem("projects_json");
-        if (projectsEditor && Array.isArray(cfg.projects)) {
-          projectsEditor.value = JSON.stringify(cfg.projects, null, 2);
-        }
-      }
-      renderProjectSelect(cfg.projects, cfg.default_project_id);
-      syncRuntimeMeta(cfg);
-      setConfigMessage("配置已加载");
-    } catch (_e) {
-      setConfigMessage("读取配置失败");
-    }
   }
 
   async function showChangesDialog(id) {
@@ -179,11 +352,7 @@
     changesDialogSubtitle.textContent = "加载中...";
     changesIgnoreList.innerHTML = "";
     changesFileBody.innerHTML = "";
-    if (typeof changesDialog.showModal === "function") {
-      changesDialog.showModal();
-    } else {
-      changesDialog.setAttribute("open", "open");
-    }
+    openDialog(changesDialog);
     try {
       const res = await fetch(`/api/deployments/${id}`, { credentials: "same-origin" });
       if (!res.ok) {
@@ -193,8 +362,8 @@
       const dep = await res.json();
       const changed = Array.isArray(dep.changed) ? dep.changed : [];
       let replaceIgnore = Array.isArray(dep.replace_ignore) ? dep.replace_ignore : [];
-      if (replaceIgnore.length === 0 && configForm) {
-        const raw = `${configForm.elements.namedItem("replace_ignore_text")?.value || ""}`;
+      if (replaceIgnore.length === 0 && projectForm) {
+        const raw = `${projectForm.elements.namedItem("replace_ignore_text")?.value || ""}`;
         replaceIgnore = raw
           .split("\n")
           .map((v) => v.trim())
@@ -258,110 +427,78 @@
 
   if (projectSelect) {
     projectSelect.addEventListener("change", () => {
-      const selected = getSelectedProject();
-      const cfgStub = {
-        service_name: selected?.service_name,
-        target_dir: selected?.target_dir,
-        current_version: selected?.current_version,
-        max_upload_mb: selected?.max_upload_mb,
-      };
-      syncRuntimeMeta(cfgStub, selected);
+      selectProject(projectSelect.value, { syncUpload: false });
     });
   }
 
-  uploadForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const formData = new FormData(uploadForm);
+  if (uploadForm) {
+    uploadForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const formData = new FormData(uploadForm);
+      const selectedID = `${formData.get("project_id") || activeProjectId || ""}`.trim();
+      if (!selectedID) {
+        uploadMessage.textContent = "请选择程序";
+        return;
+      }
+      formData.set("project_id", selectedID);
       if (!formData.get("package")) {
         uploadMessage.textContent = "请选择 zip 文件";
         return;
       }
-    if (projectSelect && !`${formData.get("project_id") || ""}`.trim()) {
-      uploadMessage.textContent = "请选择程序";
-      return;
-    }
-    const targetVersion = `${formData.get("target_version") || ""}`.trim();
-    if (targetVersion && !isValidVersion(targetVersion)) {
-      uploadMessage.textContent = "版本号格式错误，示例: 0.0.2 / 0.1.1 / 1.0.1";
-      return;
-    }
-
-    setProgress(0);
-    uploadMessage.textContent = "正在上传...";
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/upload", true);
-    xhr.withCredentials = true;
-
-    xhr.upload.onprogress = (ev) => {
-      if (!ev.lengthComputable) return;
-      setProgress((ev.loaded / ev.total) * 100);
-    };
-
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        let payload = {};
-        try {
-          payload = JSON.parse(xhr.responseText);
-        } catch (_err) {}
-        setProgress(100);
-        uploadMessage.textContent = `上传完成，任务ID: ${payload.id || "-"}，程序: ${payload.project_name || payload.project_id || "-"}，目标版本: ${payload.version || "-"}`;
-        if (payload.id) connectLogs(payload.id);
-        refreshDeployments();
-        loadConfig();
-        uploadForm.reset();
+      const targetVersion = `${formData.get("target_version") || ""}`.trim();
+      if (targetVersion && !isValidVersion(targetVersion)) {
+        uploadMessage.textContent = "版本号格式错误，示例: 0.0.2 / 0.1.1 / 1.0.1";
         return;
       }
-      let msg = `上传失败 (${xhr.status})`;
-      try {
-        const payload = JSON.parse(xhr.responseText);
-        if (payload.error) msg = payload.error;
-      } catch (_err) {}
-      uploadMessage.textContent = msg;
-    };
 
-    xhr.onerror = () => {
-      uploadMessage.textContent = "网络错误，上传失败";
-    };
+      setProgress(0);
+      uploadMessage.textContent = "正在上传...";
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/upload", true);
+      xhr.withCredentials = true;
 
-    xhr.send(formData);
-  });
+      xhr.upload.onprogress = (ev) => {
+        if (!ev.lengthComputable) return;
+        setProgress((ev.loaded / ev.total) * 100);
+      };
 
-  if (configForm) {
-    configForm.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const projectsEditor = configForm.elements.namedItem("projects_json");
-      const defaultProjectIdInput = configForm.elements.namedItem("default_project_id");
-      if (projectsEditor && defaultProjectIdInput) {
-        try {
-          const projects = JSON.parse(`${projectsEditor.value || "[]"}`);
-          if (Array.isArray(projects)) {
-            const defaultID = `${defaultProjectIdInput.value || ""}`.trim();
-            const dp =
-              projects.find((p) => `${p.id || ""}`.trim() === defaultID) ||
-              projects[0] ||
-              null;
-            if (dp) {
-              const bindMap = {
-                service_name: dp.service_name || "",
-                target_dir: dp.target_dir || "",
-                current_version: dp.current_version || "",
-                max_upload_mb: dp.max_upload_mb || "",
-                backup_ignore_text: Array.isArray(dp.backup_ignore) ? dp.backup_ignore.join("\n") : "",
-                replace_ignore_text: Array.isArray(dp.replace_ignore) ? dp.replace_ignore.join("\n") : "",
-              };
-              Object.keys(bindMap).forEach((k) => {
-                const input = configForm.elements.namedItem(k);
-                if (input) input.value = bindMap[k];
-              });
-            }
-          }
-        } catch (_err) {
-          setConfigMessage("projects_json 不是合法 JSON");
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          let payload = {};
+          try {
+            payload = JSON.parse(xhr.responseText);
+          } catch (_err) {}
+          setProgress(100);
+          uploadMessage.textContent = `上传完成，任务ID: ${payload.id || "-"}，程序: ${payload.project_name || payload.project_id || "-"}，目标版本: ${payload.version || "-"}`;
+          if (payload.id) connectLogs(payload.id);
+          refreshDeployments();
+          loadConfig(selectedID, true);
+          uploadForm.reset();
+          if (projectSelect) projectSelect.value = selectedID;
           return;
         }
-      }
-      const formData = new FormData(configForm);
-      setConfigMessage("保存中...");
+        let msg = `上传失败 (${xhr.status})`;
+        try {
+          const payload = JSON.parse(xhr.responseText);
+          if (payload.error) msg = payload.error;
+        } catch (_err) {}
+        uploadMessage.textContent = msg;
+      };
+
+      xhr.onerror = () => {
+        uploadMessage.textContent = "网络错误，上传失败";
+      };
+
+      xhr.send(formData);
+    });
+  }
+
+  if (systemForm) {
+    systemForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const formData = new FormData(systemForm);
+      formData.set("scope", "system");
+      setSystemMessage("保存中...");
       try {
         const res = await fetch("/api/config", {
           method: "POST",
@@ -370,29 +507,143 @@
         });
         const payload = await res.json().catch(() => ({}));
         if (!res.ok) {
-          setConfigMessage(payload.error || `保存失败 (${res.status})`);
+          setSystemMessage(payload.error || `保存失败 (${res.status})`);
           return;
         }
-        setConfigMessage(payload.message || "保存成功");
-        const keyInput = configForm.elements.namedItem("new_auth_key");
-        if (keyInput) keyInput.value = "";
+        let msg = payload.message || "保存成功";
         if (payload.restart_needed) {
-          setConfigMessage(`${payload.message || "保存成功"}（以下项需重启生效: ${(payload.restart_fields || []).join(", ")}）`);
+          msg = `${msg}（以下项需重启生效: ${(payload.restart_fields || []).join(", ")}）`;
         }
-        loadConfig();
+        setSystemMessage(msg);
+        await loadConfig(activeProjectId, true);
       } catch (_e) {
-        setConfigMessage("保存失败");
+        setSystemMessage("保存失败");
+      }
+    });
+  }
+
+  if (projectForm) {
+    projectForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const formData = new FormData(projectForm);
+      formData.set("scope", "project");
+      setProjectMessage("保存中...");
+      try {
+        const res = await fetch("/api/config", {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setProjectMessage(payload.error || `保存失败 (${res.status})`);
+          return;
+        }
+        let msg = payload.message || "保存成功";
+        if (payload.restart_needed) {
+          msg = `${msg}（以下项需重启生效: ${(payload.restart_fields || []).join(", ")}）`;
+        }
+        setProjectMessage(msg);
+        await loadConfig(payload.active_project_id || activeProjectId, true);
+      } catch (_e) {
+        setProjectMessage("保存失败");
+      }
+    });
+  }
+
+  if (addProjectBtn && projectCreateDialog) {
+    addProjectBtn.addEventListener("click", () => {
+      setCreateMessage("");
+      openDialog(projectCreateDialog);
+    });
+  }
+
+  if (projectCreateCancel && projectCreateDialog) {
+    projectCreateCancel.addEventListener("click", (e) => {
+      e.preventDefault();
+      closeDialog(projectCreateDialog);
+    });
+  }
+
+  if (projectCreateForm) {
+    projectCreateForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const formData = new FormData(projectCreateForm);
+      setCreateMessage("创建中...");
+      try {
+        const res = await fetch("/api/projects", {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setCreateMessage(payload.error || `创建失败 (${res.status})`);
+          return;
+        }
+        setCreateMessage(payload.message || "创建成功");
+        projectCreateForm.reset();
+        closeDialog(projectCreateDialog);
+        await loadConfig(payload.active_project_id || "", true);
+      } catch (_e) {
+        setCreateMessage("创建失败");
+      }
+    });
+  }
+
+  if (openSystemConfigBtn && systemConfigDialog) {
+    openSystemConfigBtn.addEventListener("click", () => {
+      setSystemMessage("");
+      openDialog(systemConfigDialog);
+    });
+  }
+
+  if (systemConfigClose && systemConfigDialog) {
+    systemConfigClose.addEventListener("click", () => {
+      closeDialog(systemConfigDialog);
+    });
+    systemConfigDialog.addEventListener("click", (e) => {
+      const rect = systemConfigDialog.getBoundingClientRect();
+      const inDialog =
+        rect.top <= e.clientY &&
+        e.clientY <= rect.top + rect.height &&
+        rect.left <= e.clientX &&
+        e.clientX <= rect.left + rect.width;
+      if (!inDialog) {
+        closeDialog(systemConfigDialog);
+      }
+    });
+  }
+
+  if (deleteProjectBtn) {
+    deleteProjectBtn.addEventListener("click", async () => {
+      const p = getActiveProject();
+      if (!p) return;
+      if (!window.confirm(`确认删除程序 ${p.name || p.id} (${p.id}) 吗？`)) {
+        return;
+      }
+      setProjectMessage("删除中...");
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(p.id)}`, {
+          method: "DELETE",
+          credentials: "same-origin",
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setProjectMessage(payload.error || `删除失败 (${res.status})`);
+          return;
+        }
+        setProjectMessage(payload.message || "删除成功");
+        await loadConfig(payload.active_project_id || "", true);
+      } catch (_e) {
+        setProjectMessage("删除失败");
       }
     });
   }
 
   if (changesDialogClose && changesDialog) {
     changesDialogClose.addEventListener("click", () => {
-      if (typeof changesDialog.close === "function") {
-        changesDialog.close();
-      } else {
-        changesDialog.removeAttribute("open");
-      }
+      closeDialog(changesDialog);
     });
     changesDialog.addEventListener("click", (e) => {
       const rect = changesDialog.getBoundingClientRect();
@@ -402,11 +653,7 @@
         rect.left <= e.clientX &&
         e.clientX <= rect.left + rect.width;
       if (!inDialog) {
-        if (typeof changesDialog.close === "function") {
-          changesDialog.close();
-        } else {
-          changesDialog.removeAttribute("open");
-        }
+        closeDialog(changesDialog);
       }
     });
   }
