@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 	"sync/atomic"
+	"time"
 )
 
 func (a *App) runDeployment(id string) {
@@ -87,6 +87,13 @@ func (a *App) runDeployment(id string) {
 		replaceRules = resolveReplaceIgnoreRulesForTarget(dep.TargetDir, cfg.ReplaceIgnore, cfg.BackupIgnore)
 	}
 	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
+	dep.ReplaceMode = normalizeReplaceMode(dep.ReplaceMode)
+	removeMissing := dep.ReplaceMode == ReplaceModeFull
+	if removeMissing {
+		a.publish(id, "info", "替换模式: 全部替换（目标目录中上传包不存在的文件将被删除）")
+	} else {
+		a.publish(id, "info", "替换模式: 局部替换（仅覆盖上传包中的文件，不删除其他文件）")
+	}
 
 	backupPath := filepath.Join(cfg.BackupDir, id+".zip")
 	a.publish(id, "info", "开始备份目标目录")
@@ -129,7 +136,7 @@ func (a *App) runDeployment(id string) {
 	}
 
 	a.publish(id, "info", "开始替换文件")
-	changed, err := syncDirectories(extractDir, dep.TargetDir, replaceIgnore)
+	changed, err := syncDirectories(extractDir, dep.TargetDir, replaceIgnore, removeMissing)
 	if err != nil {
 		if serviceManaged {
 			if restartErr := startService(dep.ServiceName, 45*time.Second); restartErr != nil {

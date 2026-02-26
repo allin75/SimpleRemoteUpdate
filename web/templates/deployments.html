@@ -50,6 +50,7 @@
   <td class="px-3 py-2">{{.LoginIP}}</td>
   <td class="px-3 py-2 text-xs space-y-1">
     <div>{{changedSummary .Changed}}</div>
+    <div class="text-slate-500">替换模式: {{if .ReplaceMode}}{{.ReplaceMode}}{{else}}full{{end}}</div>
     <div class="text-slate-500">替换忽略: {{len .ReplaceIgnore}} 条</div>
     <button onclick="window.updaterShowChanges('{{.ID}}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">查看明细</button>
   </td>

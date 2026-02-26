@@ -68,6 +68,13 @@
               max_upload_mb
               <input name="max_upload_mb" type="number" min="1" step="1" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
             </label>
+            <label class="block text-sm">
+              default_replace_mode
+              <select name="default_replace_mode" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm">
+                <option value="full">full（全部替换，会删除目标目录中上传包不存在的文件）</option>
+                <option value="partial">partial（局部替换，只覆盖上传包内文件）</option>
+              </select>
+            </label>
             <label class="block text-sm md:col-span-2 xl:col-span-3">
               <span class="inline-flex items-center">
                 backup_ignore_text（每行一个忽略规则）
@@ -119,6 +126,15 @@
             <input id="target-version-input" name="target_version" placeholder="例如 0.1.1 或留空自动递增"
                    class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
             <span id="next-version-label" class="mt-1 block text-xs text-slate-500">默认下一版本: -</span>
+          </label>
+          <label class="block text-sm">
+            本次替换模式
+            <select id="upload-replace-mode" name="replace_mode"
+                    class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white">
+              <option value="full">full（全部替换）</option>
+              <option value="partial">partial（局部替换）</option>
+            </select>
+            <span class="mt-1 block text-xs text-slate-500">可按本次发布切换；局部替换不会删除目标目录已有文件</span>
           </label>
           <label class="block text-sm">
             更新说明（可编辑）
@@ -192,6 +208,13 @@
       <label class="block text-sm">
         max_upload_mb
         <input name="max_upload_mb" type="number" min="1" step="1" value="1024" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+      </label>
+      <label class="block text-sm">
+        default_replace_mode
+        <select name="default_replace_mode" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm">
+          <option value="full">full（全部替换）</option>
+          <option value="partial">partial（局部替换）</option>
+        </select>
       </label>
       <label class="block text-sm md:col-span-2">
         <span class="inline-flex items-center">

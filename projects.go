@@ -8,14 +8,15 @@ import (
 func normalizeProjects(cfg *Config) {
 	if len(cfg.Projects) == 0 {
 		cfg.Projects = []ManagedProject{{
-			ID:             "default",
-			Name:           firstNonEmpty(strings.TrimSpace(cfg.ServiceName), "默认程序"),
-			ServiceName:    strings.TrimSpace(cfg.ServiceName),
-			TargetDir:      strings.TrimSpace(cfg.TargetDir),
-			CurrentVersion: firstNonEmpty(strings.TrimSpace(cfg.CurrentVersion), "0.0.1"),
-			BackupIgnore:   append([]string{}, cfg.BackupIgnore...),
-			ReplaceIgnore:  append([]string{}, cfg.ReplaceIgnore...),
-			MaxUploadMB:    cfg.MaxUploadMB,
+			ID:                 "default",
+			Name:               firstNonEmpty(strings.TrimSpace(cfg.ServiceName), "默认程序"),
+			ServiceName:        strings.TrimSpace(cfg.ServiceName),
+			TargetDir:          strings.TrimSpace(cfg.TargetDir),
+			CurrentVersion:     firstNonEmpty(strings.TrimSpace(cfg.CurrentVersion), "0.0.1"),
+			DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
+			BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
+			ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
+			MaxUploadMB:        cfg.MaxUploadMB,
 		}}
 	}
 
@@ -35,6 +36,11 @@ func normalizeProjects(cfg *Config) {
 		p.ServiceName = strings.TrimSpace(p.ServiceName)
 		p.TargetDir = strings.TrimSpace(p.TargetDir)
 		p.CurrentVersion = firstNonEmpty(strings.TrimSpace(p.CurrentVersion), "0.0.1")
+		mode := strings.TrimSpace(p.DefaultReplaceMode)
+		if mode == "" {
+			mode = cfg.ReplaceMode
+		}
+		p.DefaultReplaceMode = normalizeReplaceMode(mode)
 		if p.MaxUploadMB <= 0 {
 			p.MaxUploadMB = cfg.MaxUploadMB
 		}
@@ -51,14 +57,15 @@ func normalizeProjects(cfg *Config) {
 	}
 	if len(out) == 0 {
 		out = []ManagedProject{{
-			ID:             "default",
-			Name:           "默认程序",
-			ServiceName:    strings.TrimSpace(cfg.ServiceName),
-			TargetDir:      strings.TrimSpace(cfg.TargetDir),
-			CurrentVersion: "0.0.1",
-			BackupIgnore:   append([]string{}, cfg.BackupIgnore...),
-			ReplaceIgnore:  append([]string{}, cfg.ReplaceIgnore...),
-			MaxUploadMB:    firstInt64(cfg.MaxUploadMB, 1024),
+			ID:                 "default",
+			Name:               "默认程序",
+			ServiceName:        strings.TrimSpace(cfg.ServiceName),
+			TargetDir:          strings.TrimSpace(cfg.TargetDir),
+			CurrentVersion:     "0.0.1",
+			DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
+			BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
+			ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
+			MaxUploadMB:        firstInt64(cfg.MaxUploadMB, 1024),
 		}}
 	}
 	cfg.Projects = out
@@ -74,6 +81,7 @@ func normalizeProjects(cfg *Config) {
 	cfg.ServiceName = dp.ServiceName
 	cfg.TargetDir = dp.TargetDir
 	cfg.CurrentVersion = dp.CurrentVersion
+	cfg.ReplaceMode = dp.DefaultReplaceMode
 	cfg.BackupIgnore = append([]string{}, dp.BackupIgnore...)
 	cfg.ReplaceIgnore = append([]string{}, dp.ReplaceIgnore...)
 	cfg.MaxUploadMB = dp.MaxUploadMB
@@ -96,14 +104,24 @@ func getDefaultProject(cfg Config) ManagedProject {
 		return cfg.Projects[0]
 	}
 	return ManagedProject{
-		ID:             "default",
-		Name:           "默认程序",
-		ServiceName:    cfg.ServiceName,
-		TargetDir:      cfg.TargetDir,
-		CurrentVersion: firstNonEmpty(cfg.CurrentVersion, "0.0.1"),
-		BackupIgnore:   append([]string{}, cfg.BackupIgnore...),
-		ReplaceIgnore:  append([]string{}, cfg.ReplaceIgnore...),
-		MaxUploadMB:    firstInt64(cfg.MaxUploadMB, 1024),
+		ID:                 "default",
+		Name:               "默认程序",
+		ServiceName:        cfg.ServiceName,
+		TargetDir:          cfg.TargetDir,
+		CurrentVersion:     firstNonEmpty(cfg.CurrentVersion, "0.0.1"),
+		DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
+		BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
+		ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
+		MaxUploadMB:        firstInt64(cfg.MaxUploadMB, 1024),
+	}
+}
+
+func normalizeReplaceMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ReplaceModePartial:
+		return ReplaceModePartial
+	default:
+		return ReplaceModeFull
 	}
 }
 

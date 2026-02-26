@@ -235,7 +235,7 @@ func extractZip(srcZip, dstDir string) error {
 	return nil
 }
 
-func syncDirectories(src, target string, ignore *IgnoreMatcher) ([]ChangedFile, error) {
+func syncDirectories(src, target string, ignore *IgnoreMatcher, removeMissing bool) ([]ChangedFile, error) {
 	type srcFile struct {
 		abs  string
 		size int64
@@ -280,45 +280,47 @@ func syncDirectories(src, target string, ignore *IgnoreMatcher) ([]ChangedFile, 
 	changes := make([]ChangedFile, 0)
 	targetDirs := make([]string, 0)
 
-	err = filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if path == target {
-			return nil
-		}
-		rel, err := filepath.Rel(target, path)
-		if err != nil {
-			return err
-		}
-		rel = normalizeRelPath(rel)
-		if ignore.ShouldIgnore(rel, d.IsDir()) {
-			if d.IsDir() {
-				return filepath.SkipDir
+	if removeMissing {
+		err = filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
 			}
-			return nil
-		}
-		if d.IsDir() {
-			if _, ok := sourceDirs[rel]; !ok {
-				targetDirs = append(targetDirs, path)
+			if path == target {
+				return nil
 			}
-			return nil
-		}
-		if _, ok := sourceFiles[rel]; !ok {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			rel, err := filepath.Rel(target, path)
+			if err != nil {
 				return err
 			}
-			changes = append(changes, ChangedFile{Path: rel, Action: "deleted", Size: 0})
+			rel = normalizeRelPath(rel)
+			if ignore.ShouldIgnore(rel, d.IsDir()) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				if _, ok := sourceDirs[rel]; !ok {
+					targetDirs = append(targetDirs, path)
+				}
+				return nil
+			}
+			if _, ok := sourceFiles[rel]; !ok {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				changes = append(changes, ChangedFile{Path: rel, Action: "deleted", Size: 0})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
 
-	sort.Slice(targetDirs, func(i, j int) bool { return len(targetDirs[i]) > len(targetDirs[j]) })
-	for _, d := range targetDirs {
-		_ = os.Remove(d)
+		sort.Slice(targetDirs, func(i, j int) bool { return len(targetDirs[i]) > len(targetDirs[j]) })
+		for _, d := range targetDirs {
+			_ = os.Remove(d)
+		}
 	}
 
 	keys := make([]string, 0, len(sourceFiles))

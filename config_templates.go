@@ -25,6 +25,7 @@ func defaultConfig() Config {
 		LogFile:         "data/updater.log",
 		ServiceName:     "YourServiceName",
 		TargetDir:       "C:/YourApp",
+		ReplaceMode:     ReplaceModeFull,
 		BackupIgnore:    []string{"logs/", "temp/", "*.log"},
 		ReplaceIgnore:   []string{"logs/", "temp/", "*.log"},
 		MaxUploadMB:     1024,
@@ -59,6 +60,7 @@ func loadConfig(path string) (Config, error) {
 	if cfg.ReplaceIgnore == nil {
 		cfg.ReplaceIgnore = []string{"logs/", "temp/", "*.log"}
 	}
+	cfg.ReplaceMode = normalizeReplaceMode(cfg.ReplaceMode)
 	if cfg.MaxUploadMB <= 0 {
 		cfg.MaxUploadMB = 1024
 	}

@@ -258,14 +258,22 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if targetVersion == "" {
 		nextVer, nextErr := nextPatchVersion(project.CurrentVersion)
 		if nextErr != nil {
+			atomic.StoreInt32(&a.deploying, 0)
+			_ = os.Remove(uploadPath)
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("当前版本格式错误，无法自动递增: %v", nextErr)})
 			return
 		}
 		targetVersion = nextVer
 	}
 	if !isValidVersion(targetVersion) {
+		atomic.StoreInt32(&a.deploying, 0)
+		_ = os.Remove(uploadPath)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("版本号格式错误: %s，正确格式示例: 0.0.2 / 0.1.1 / 1.0.1", targetVersion)})
 		return
+	}
+	replaceMode := normalizeReplaceMode(r.FormValue("replace_mode"))
+	if strings.TrimSpace(r.FormValue("replace_mode")) == "" {
+		replaceMode = normalizeReplaceMode(project.DefaultReplaceMode)
 	}
 
 	dep := Deployment{
@@ -274,6 +282,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		Version:       targetVersion,
 		ProjectID:     project.ID,
 		ProjectName:   project.Name,
+		ReplaceMode:   replaceMode,
 		BackupIgnore:  append([]string{}, project.BackupIgnore...),
 		ReplaceIgnore: append([]string{}, resolveReplaceIgnoreRulesForTarget(project.TargetDir, project.ReplaceIgnore, project.BackupIgnore)...),
 		Status:        "queued",
@@ -437,6 +446,7 @@ func (a *App) handleRollback(w http.ResponseWriter, r *http.Request, sourceID st
 		Version:       source.Version,
 		ProjectID:     source.ProjectID,
 		ProjectName:   source.ProjectName,
+		ReplaceMode:   source.ReplaceMode,
 		BackupIgnore:  append([]string{}, source.BackupIgnore...),
 		ReplaceIgnore: append([]string{}, source.ReplaceIgnore...),
 		Status:        "queued",
@@ -554,6 +564,12 @@ func (a *App) handleSaveProjectConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("current_version 格式错误: %s，必须是 x.y.z", project.CurrentVersion)})
 		return
 	}
+	rawReplaceMode := strings.TrimSpace(r.FormValue("default_replace_mode"))
+	if rawReplaceMode != "" {
+		project.DefaultReplaceMode = normalizeReplaceMode(rawReplaceMode)
+	} else {
+		project.DefaultReplaceMode = normalizeReplaceMode(project.DefaultReplaceMode)
+	}
 
 	maxUploadMB, err := parsePositiveInt64(r.FormValue("max_upload_mb"), "max_upload_mb")
 	if err != nil {
@@ -626,14 +642,15 @@ func (a *App) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := ManagedProject{
-		ID:             projectID,
-		Name:           firstNonEmpty(strings.TrimSpace(r.FormValue("name")), projectID),
-		ServiceName:    strings.TrimSpace(r.FormValue("service_name")),
-		TargetDir:      strings.TrimSpace(r.FormValue("target_dir")),
-		CurrentVersion: normalizeVersion(r.FormValue("current_version")),
-		MaxUploadMB:    maxUploadMB,
-		BackupIgnore:   splitLinesTrim(r.FormValue("backup_ignore_text")),
-		ReplaceIgnore:  splitLinesTrim(r.FormValue("replace_ignore_text")),
+		ID:                 projectID,
+		Name:               firstNonEmpty(strings.TrimSpace(r.FormValue("name")), projectID),
+		ServiceName:        strings.TrimSpace(r.FormValue("service_name")),
+		TargetDir:          strings.TrimSpace(r.FormValue("target_dir")),
+		CurrentVersion:     normalizeVersion(r.FormValue("current_version")),
+		DefaultReplaceMode: normalizeReplaceMode(r.FormValue("default_replace_mode")),
+		MaxUploadMB:        maxUploadMB,
+		BackupIgnore:       splitLinesTrim(r.FormValue("backup_ignore_text")),
+		ReplaceIgnore:      splitLinesTrim(r.FormValue("replace_ignore_text")),
 	}
 	if project.CurrentVersion == "" {
 		project.CurrentVersion = "0.0.1"
@@ -653,6 +670,10 @@ func (a *App) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
 	if len(project.ReplaceIgnore) == 0 {
 		dp := getDefaultProject(newCfg)
 		project.ReplaceIgnore = append([]string{}, dp.ReplaceIgnore...)
+	}
+	if strings.TrimSpace(r.FormValue("default_replace_mode")) == "" {
+		dp := getDefaultProject(newCfg)
+		project.DefaultReplaceMode = normalizeReplaceMode(dp.DefaultReplaceMode)
 	}
 
 	newCfg.Projects = append(newCfg.Projects, project)
@@ -744,22 +765,24 @@ func configSnapshot(cfg Config) map[string]any {
 	projectsJSON, _ := json.MarshalIndent(cfg.Projects, "", "  ")
 	dp := getDefaultProject(cfg)
 	return map[string]any{
-		"listen_addr":         cfg.ListenAddr,
-		"session_cookie":      cfg.SessionCookie,
-		"default_project_id":  cfg.DefaultProjectID,
-		"projects_json":       string(projectsJSON),
-		"projects":            cfg.Projects,
-		"current_version":     dp.CurrentVersion,
-		"upload_dir":          cfg.UploadDir,
-		"work_dir":            cfg.WorkDir,
-		"backup_dir":          cfg.BackupDir,
-		"deployments_file":    cfg.DeploymentsFile,
-		"log_file":            cfg.LogFile,
-		"service_name":        dp.ServiceName,
-		"target_dir":          dp.TargetDir,
-		"backup_ignore_text":  strings.Join(dp.BackupIgnore, "\n"),
-		"replace_ignore_text": strings.Join(dp.ReplaceIgnore, "\n"),
-		"max_upload_mb":       dp.MaxUploadMB,
+		"listen_addr":          cfg.ListenAddr,
+		"session_cookie":       cfg.SessionCookie,
+		"default_project_id":   cfg.DefaultProjectID,
+		"projects_json":        string(projectsJSON),
+		"projects":             cfg.Projects,
+		"current_version":      dp.CurrentVersion,
+		"upload_dir":           cfg.UploadDir,
+		"work_dir":             cfg.WorkDir,
+		"backup_dir":           cfg.BackupDir,
+		"deployments_file":     cfg.DeploymentsFile,
+		"log_file":             cfg.LogFile,
+		"service_name":         dp.ServiceName,
+		"target_dir":           dp.TargetDir,
+		"replace_mode":         dp.DefaultReplaceMode,
+		"default_replace_mode": dp.DefaultReplaceMode,
+		"backup_ignore_text":   strings.Join(dp.BackupIgnore, "\n"),
+		"replace_ignore_text":  strings.Join(dp.ReplaceIgnore, "\n"),
+		"max_upload_mb":        dp.MaxUploadMB,
 	}
 }
 

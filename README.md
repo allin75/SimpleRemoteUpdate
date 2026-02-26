@@ -6,6 +6,9 @@
 
 - 多程序独立配置（互不干扰）：`service_name`、`target_dir`、`current_version`、忽略规则等按程序保存。
 - 更新流程：上传 ZIP -> 备份 -> 停服务（可选）-> 替换文件 -> 启服务（可选）-> 记录部署结果。
+- 更新模式可选：
+  - `full`（全部替换）：删除目标目录中“上传包不存在”的文件，适合完整发版。
+  - `partial`（局部替换）：仅覆盖上传包内文件，不删除目标目录其他文件，适合增量发版。
 - 回滚流程：基于历史备份包恢复，支持替换忽略规则。
 - 实时日志：SSE 推送部署日志。
 - 部署记录：分页懒加载（避免一次性渲染大量记录导致卡顿）。
@@ -54,8 +57,14 @@ echo -n "你的密钥" | openssl dgst -sha256
 ## 配置说明（核心）
 
 - 系统级：`listen_addr`、`session_cookie`、`auth_key_sha256`、`upload_dir`、`work_dir`、`backup_dir`、`deployments_file`、`log_file`。
-- 程序级（`projects[]`）：`id`、`name`、`service_name`、`target_dir`、`current_version`、`max_upload_mb`、`backup_ignore`、`replace_ignore`。
+- 程序级（`projects[]`）：`id`、`name`、`service_name`、`target_dir`、`current_version`、`max_upload_mb`、`default_replace_mode`、`backup_ignore`、`replace_ignore`。
 - `service_name` 可为空：为空时部署/回滚将跳过服务启停，仅进行文件替换。
+
+### 部署时替换策略
+
+- 页面“程序配置”可设置程序默认 `default_replace_mode`。
+- 页面“上传部署包”可按本次任务覆盖 `replace_mode`。
+- 部署记录与变更明细会展示本次任务实际使用的替换模式。
 
 ## 忽略规则写法
 

@@ -9,6 +9,7 @@
   const runtimeSummary = document.getElementById("runtime-summary");
   const maxUploadLabel = document.getElementById("max-upload-label");
   const projectSelect = document.getElementById("project-select");
+  const uploadReplaceMode = document.getElementById("upload-replace-mode");
   const targetVersionInput = document.getElementById("target-version-input");
   const nextVersionLabel = document.getElementById("next-version-label");
 
@@ -153,6 +154,9 @@
     if (targetVersionInput) {
       targetVersionInput.placeholder = `留空自动递增为 ${nextPatchVersion(currentVersion || "0.0.1")}`;
     }
+    if (uploadReplaceMode) {
+      uploadReplaceMode.value = p?.default_replace_mode === "partial" ? "partial" : "full";
+    }
   }
 
   function renderUploadProjectSelect(projects, selectedID) {
@@ -209,6 +213,7 @@
         </div>
         <div class="mt-1 text-xs text-slate-500 font-mono break-all">${p.id}</div>
         <div class="mt-1 text-xs text-slate-500 break-all">版本: ${p.current_version || "-"} | 服务: ${p.service_name || "-"}</div>
+        <div class="mt-1 text-xs text-slate-500 break-all">默认替换: ${p.default_replace_mode === "partial" ? "partial" : "full"}</div>
       `;
       btn.addEventListener("click", () => selectProject(p.id));
       projectSidebar.appendChild(btn);
@@ -224,6 +229,7 @@
       service_name: project?.service_name || "",
       target_dir: project?.target_dir || "",
       max_upload_mb: project?.max_upload_mb || "",
+      default_replace_mode: project?.default_replace_mode === "partial" ? "partial" : "full",
       backup_ignore_text: Array.isArray(project?.backup_ignore) ? project.backup_ignore.join("\n") : "",
       replace_ignore_text: Array.isArray(project?.replace_ignore) ? project.replace_ignore.join("\n") : "",
     };
@@ -369,7 +375,7 @@
           .map((v) => v.trim())
           .filter((v) => v.length > 0);
       }
-      changesDialogSubtitle.textContent = `程序: ${dep.project_name || dep.project_id || "-"} | 类型: ${dep.type || "-"} | 版本: ${dep.version || "-"} | 状态: ${dep.status || "-"}`;
+      changesDialogSubtitle.textContent = `程序: ${dep.project_name || dep.project_id || "-"} | 类型: ${dep.type || "-"} | 版本: ${dep.version || "-"} | 状态: ${dep.status || "-"} | 替换模式: ${dep.replace_mode || "full"}`;
 
       if (replaceIgnore.length === 0) {
         const empty = document.createElement("div");
@@ -449,6 +455,10 @@
       if (targetVersion && !isValidVersion(targetVersion)) {
         uploadMessage.textContent = "版本号格式错误，示例: 0.0.2 / 0.1.1 / 1.0.1";
         return;
+      }
+      const replaceMode = `${formData.get("replace_mode") || ""}`.trim().toLowerCase();
+      if (replaceMode !== "full" && replaceMode !== "partial") {
+        formData.set("replace_mode", "full");
       }
 
       setProgress(0);
