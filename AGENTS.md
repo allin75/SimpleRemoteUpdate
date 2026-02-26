@@ -53,3 +53,11 @@ This project is a Go-based Windows remote updater with embedded web UI.
 - Do not commit real secrets, production keys, or runtime artifacts (`data/`, `updater.exe`).
 - Store only SHA-256 key hashes in config (`auth_key_sha256`), never plaintext keys.
 - Validate ignore rules carefully; wrong patterns may skip required files during deploy/rollback.
+
+## Push Workflow (User Shortcut)
+- If the user says `推送`, execute this workflow by default:
+  - summarize what features/fixes were updated in this round;
+  - build executable with `go build -o updater.exe .`;
+  - commit code changes with a clear Conventional Commit message;
+  - push to GitHub remote branch (normally `origin/main`).
+- Unless the user explicitly asks, do not commit runtime data (`data/`, `config.json`) with the push.
