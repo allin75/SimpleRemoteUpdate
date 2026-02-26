@@ -1,0 +1,47 @@
+{
+  "listen_addr": ":12333",
+  "session_cookie": "updater_session",
+  "auth_key_sha256": "f6e0a1e2ac41945a9aa7ff8a8aaa0cebc12a3bcc981a929ad5cf810a090e11ae",
+  "default_project_id": "default",
+  "projects": [
+    {
+      "id": "default",
+      "name": "fortest",
+      "service_name": "fortest",
+      "target_dir": "E:\\IOTEdge\\Yi.Abp.Net8\\src\\Yi.Abp.Web\\bin\\Debug\\net8.0",
+      "current_version": "1.0.4",
+      "backup_ignore": [
+        "logs/",
+        "temp/",
+        "*.log"
+      ],
+      "replace_ignore": [
+        "logs/",
+        "temp/",
+        "*.log",
+        "appsettings.json"
+      ],
+      "max_upload_mb": 1024
+    }
+  ],
+  "current_version": "1.0.4",
+  "upload_dir": "data/uploads",
+  "work_dir": "data/work",
+  "backup_dir": "data/backups",
+  "deployments_file": "data/deployments.json",
+  "log_file": "data/updater.log",
+  "service_name": "fortest",
+  "target_dir": "E:\\IOTEdge\\Yi.Abp.Net8\\src\\Yi.Abp.Web\\bin\\Debug\\net8.0",
+  "backup_ignore": [
+    "logs/",
+    "temp/",
+    "*.log"
+  ],
+  "replace_ignore": [
+    "logs/",
+    "temp/",
+    "*.log",
+    "appsettings.json"
+  ],
+  "max_upload_mb": 1024
+}

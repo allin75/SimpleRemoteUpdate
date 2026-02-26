@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Updater 登录</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/static/theme.css">
+</head>
+<body class="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+  <div class="w-full max-w-md bg-white rounded-xl shadow p-6 space-y-4">
+    <h1 class="text-2xl font-semibold text-slate-800">程序更新系统</h1>
+    <p class="text-sm text-slate-500">请输入部署密钥登录</p>
+    {{if .Error}}
+    <div class="bg-rose-50 text-rose-700 text-sm px-3 py-2 rounded border border-rose-200">{{.Error}}</div>
+    {{end}}
+    <form method="post" action="/login" class="space-y-3">
+      <label class="block text-sm text-slate-700">
+        密钥
+        <input name="key" type="password" autocomplete="current-password" required
+               class="mt-1 w-full rounded border border-slate-300 px-3 py-2 outline-none focus:ring-2 focus:ring-slate-400"/>
+      </label>
+      <button type="submit"
+              class="w-full bg-slate-800 text-white py-2 rounded hover:bg-slate-700">登录</button>
+    </form>
+  </div>
+</body>
+</html>

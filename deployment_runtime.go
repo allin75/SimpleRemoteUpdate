@@ -1,0 +1,305 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+	"sync/atomic"
+)
+
+func (a *App) runDeployment(id string) {
+	defer atomic.StoreInt32(&a.deploying, 0)
+	defer func() {
+		if rec := recover(); rec != nil {
+			a.logger.Error("deployment panic", "deployment_id", id, "panic", rec)
+			_ = a.store.UpdateField(id, func(dep *Deployment) {
+				dep.Status = "failed"
+				now := time.Now()
+				dep.FinishedAt = &now
+				dep.DurationMs = now.Sub(dep.StartedAt).Milliseconds()
+				dep.Error = fmt.Sprintf("panic: %v", rec)
+			})
+			a.publish(id, "error", "部署异常崩溃: %v", rec)
+		}
+	}()
+
+	dep, ok := a.store.Get(id)
+	if !ok {
+		return
+	}
+	cfg := a.currentConfig()
+	if dep.ProjectID != "" {
+		if p, exists := findProjectByID(cfg.Projects, dep.ProjectID); exists {
+			if dep.ServiceName == "" {
+				dep.ServiceName = p.ServiceName
+			}
+			if dep.TargetDir == "" {
+				dep.TargetDir = p.TargetDir
+			}
+			if len(dep.BackupIgnore) == 0 {
+				dep.BackupIgnore = append([]string{}, p.BackupIgnore...)
+			}
+			if len(dep.ReplaceIgnore) == 0 {
+				dep.ReplaceIgnore = append([]string{}, p.ReplaceIgnore...)
+			}
+		}
+	}
+	if dep.ServiceName == "" || dep.TargetDir == "" {
+		dp := getDefaultProject(cfg)
+		if dep.ServiceName == "" {
+			dep.ServiceName = dp.ServiceName
+		}
+		if dep.TargetDir == "" {
+			dep.TargetDir = dp.TargetDir
+		}
+	}
+	start := time.Now()
+	_ = a.store.UpdateField(id, func(d *Deployment) {
+		d.Status = "deploying"
+		d.StartedAt = start
+	})
+
+	finish := func(status string, err error, changed []ChangedFile, backupPath string) {
+		now := time.Now()
+		_ = a.store.UpdateField(id, func(d *Deployment) {
+			d.Status = status
+			d.FinishedAt = &now
+			d.DurationMs = now.Sub(start).Milliseconds()
+			if len(changed) > 0 {
+				d.Changed = changed
+			}
+			if backupPath != "" {
+				d.BackupFile = backupPath
+			}
+			if err != nil {
+				d.Error = err.Error()
+			} else {
+				d.Error = ""
+			}
+		})
+	}
+
+	a.publish(id, "info", "部署开始")
+	backupRules := dep.BackupIgnore
+	if len(backupRules) == 0 {
+		backupRules = cfg.BackupIgnore
+	}
+	backupIgnore := loadBackupIgnoreMatcherForTarget(dep.TargetDir, backupRules)
+	replaceRules := dep.ReplaceIgnore
+	if len(replaceRules) == 0 {
+		replaceRules = resolveReplaceIgnoreRulesForTarget(dep.TargetDir, cfg.ReplaceIgnore, cfg.BackupIgnore)
+	}
+	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
+
+	backupPath := filepath.Join(cfg.BackupDir, id+".zip")
+	a.publish(id, "info", "开始备份目标目录")
+	if err := zipDirectory(dep.TargetDir, backupPath, backupIgnore); err != nil {
+		finish("failed", fmt.Errorf("备份失败: %w", err), nil, "")
+		a.publish(id, "error", "备份失败: %v", err)
+		return
+	}
+	_ = a.store.UpdateField(id, func(d *Deployment) { d.BackupFile = backupPath })
+	a.publish(id, "info", "备份完成: %s", backupPath)
+
+	workDir := filepath.Join(cfg.WorkDir, id)
+	extractDir := filepath.Join(workDir, "extract")
+	_ = os.RemoveAll(workDir)
+	if err := os.MkdirAll(extractDir, 0755); err != nil {
+		finish("failed", fmt.Errorf("创建临时目录失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "创建临时目录失败: %v", err)
+		return
+	}
+	defer os.RemoveAll(workDir)
+
+	a.publish(id, "info", "解压上传包")
+	if err := extractZip(dep.UploadFile, extractDir); err != nil {
+		finish("failed", fmt.Errorf("解压失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "解压失败: %v", err)
+		return
+	}
+
+	a.publish(id, "info", "停止服务: %s", dep.ServiceName)
+	if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
+		finish("failed", fmt.Errorf("停止服务失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "停止服务失败: %v", err)
+		return
+	}
+	a.publish(id, "info", "服务已停止")
+
+	a.publish(id, "info", "开始替换文件")
+	changed, err := syncDirectories(extractDir, dep.TargetDir, replaceIgnore)
+	if err != nil {
+		if restartErr := startService(dep.ServiceName, 45*time.Second); restartErr != nil {
+			err = fmt.Errorf("%v; 尝试恢复启动服务失败: %v", err, restartErr)
+		}
+		finish("failed", fmt.Errorf("替换文件失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "替换文件失败: %v", err)
+		return
+	}
+	a.publish(id, "info", "文件替换完成，变更文件数: %d", len(changed))
+
+	a.publish(id, "info", "启动服务: %s", dep.ServiceName)
+	if err := startService(dep.ServiceName, 45*time.Second); err != nil {
+		finish("failed", fmt.Errorf("启动服务失败: %w", err), changed, backupPath)
+		a.publish(id, "error", "启动服务失败: %v", err)
+		return
+	}
+
+	if dep.Version != "" {
+		if err := a.setProjectCurrentVersion(dep.ProjectID, dep.Version); err != nil {
+			a.publish(id, "warn", "部署成功，但写入当前版本失败: %v", err)
+		} else {
+			a.publish(id, "info", "当前版本已更新为: %s", dep.Version)
+		}
+	}
+
+	finish("success", nil, changed, backupPath)
+	a.publish(id, "info", "部署完成，耗时 %d ms", time.Since(start).Milliseconds())
+}
+
+func (a *App) runRollback(id, sourceID string) {
+	defer atomic.StoreInt32(&a.deploying, 0)
+	defer func() {
+		if rec := recover(); rec != nil {
+			a.logger.Error("rollback panic", "deployment_id", id, "panic", rec)
+			_ = a.store.UpdateField(id, func(dep *Deployment) {
+				dep.Status = "failed"
+				now := time.Now()
+				dep.FinishedAt = &now
+				dep.DurationMs = now.Sub(dep.StartedAt).Milliseconds()
+				dep.Error = fmt.Sprintf("panic: %v", rec)
+			})
+			a.publish(id, "error", "回滚异常崩溃: %v", rec)
+		}
+	}()
+
+	dep, ok := a.store.Get(id)
+	if !ok {
+		return
+	}
+	cfg := a.currentConfig()
+	source, ok := a.store.Get(sourceID)
+	if !ok {
+		_ = a.store.UpdateField(id, func(d *Deployment) {
+			d.Status = "failed"
+			now := time.Now()
+			d.FinishedAt = &now
+			d.DurationMs = now.Sub(d.StartedAt).Milliseconds()
+			d.Error = "源部署记录不存在"
+		})
+		return
+	}
+
+	start := time.Now()
+	_ = a.store.UpdateField(id, func(d *Deployment) {
+		d.Status = "rollbacking"
+		d.StartedAt = start
+	})
+
+	finish := func(status string, err error) {
+		now := time.Now()
+		_ = a.store.UpdateField(id, func(d *Deployment) {
+			d.Status = status
+			d.FinishedAt = &now
+			d.DurationMs = now.Sub(start).Milliseconds()
+			if err != nil {
+				d.Error = err.Error()
+			} else {
+				d.Error = ""
+			}
+		})
+	}
+
+	if dep.BackupFile == "" {
+		dep.BackupFile = source.BackupFile
+	}
+	if dep.ServiceName == "" {
+		dep.ServiceName = source.ServiceName
+	}
+	if dep.TargetDir == "" {
+		dep.TargetDir = source.TargetDir
+	}
+	if len(dep.ReplaceIgnore) == 0 && len(source.ReplaceIgnore) > 0 {
+		dep.ReplaceIgnore = append([]string{}, source.ReplaceIgnore...)
+	}
+	if dep.BackupFile == "" {
+		finish("failed", errors.New("回滚失败: 备份文件路径为空"))
+		a.publish(id, "error", "回滚失败: 备份文件路径为空")
+		return
+	}
+	if _, err := os.Stat(dep.BackupFile); err != nil {
+		finish("failed", fmt.Errorf("回滚失败: 找不到备份文件 %s", dep.BackupFile))
+		a.publish(id, "error", "回滚失败: 找不到备份文件 %s", dep.BackupFile)
+		return
+	}
+
+	replaceRules := dep.ReplaceIgnore
+	if len(replaceRules) == 0 {
+		replaceRules = resolveReplaceIgnoreRulesForTarget(dep.TargetDir, cfg.ReplaceIgnore, cfg.BackupIgnore)
+	}
+	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
+	a.publish(id, "info", "回滚开始，目标记录: %s", sourceID)
+	a.publish(id, "info", "停止服务: %s", dep.ServiceName)
+	if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
+		finish("failed", fmt.Errorf("停止服务失败: %w", err))
+		a.publish(id, "error", "停止服务失败: %v", err)
+		return
+	}
+
+	a.publish(id, "info", "清理目标目录（保留忽略项）")
+	if err := clearDirWithIgnore(dep.TargetDir, replaceIgnore); err != nil {
+		_ = startService(dep.ServiceName, 45*time.Second)
+		finish("failed", fmt.Errorf("清理目标目录失败: %w", err))
+		a.publish(id, "error", "清理目标目录失败: %v", err)
+		return
+	}
+
+	a.publish(id, "info", "恢复备份包: %s", dep.BackupFile)
+	if err := extractZip(dep.BackupFile, dep.TargetDir); err != nil {
+		_ = startService(dep.ServiceName, 45*time.Second)
+		finish("failed", fmt.Errorf("恢复备份失败: %w", err))
+		a.publish(id, "error", "恢复备份失败: %v", err)
+		return
+	}
+
+	a.publish(id, "info", "启动服务: %s", dep.ServiceName)
+	if err := startService(dep.ServiceName, 45*time.Second); err != nil {
+		finish("failed", fmt.Errorf("启动服务失败: %w", err))
+		a.publish(id, "error", "启动服务失败: %v", err)
+		return
+	}
+
+	if source.Version != "" {
+		projectID := source.ProjectID
+		if projectID == "" {
+			projectID = dep.ProjectID
+		}
+		if err := a.setProjectCurrentVersion(projectID, source.Version); err != nil {
+			a.publish(id, "warn", "回滚成功，但写入当前版本失败: %v", err)
+		} else {
+			a.publish(id, "info", "当前版本已回滚为: %s", source.Version)
+		}
+	}
+
+	finish("success", nil)
+	a.publish(id, "info", "回滚完成，耗时 %d ms", time.Since(start).Milliseconds())
+}
+
+func (a *App) publish(depID, level, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	switch level {
+	case "error":
+		a.logger.Error(msg, "deployment_id", depID)
+	case "warn":
+		a.logger.Warn(msg, "deployment_id", depID)
+	default:
+		a.logger.Info(msg, "deployment_id", depID)
+	}
+	a.events.Publish(depID, Event{
+		Time:  time.Now().Format("15:04:05"),
+		Level: level,
+		Text:  msg,
+	})
+}

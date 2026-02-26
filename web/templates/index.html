@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>远程更新控制台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.0"></script>
+  <link rel="stylesheet" href="/static/theme.css">
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-800">
+  <div class="max-w-7xl mx-auto p-4 md:p-6 space-y-4">
+    <header class="bg-white rounded-xl shadow p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+      <div>
+        <h1 class="text-2xl font-semibold">远程更新控制台</h1>
+        <p id="runtime-summary" class="text-sm text-slate-500">服务: {{.ServiceName}} | 目录: {{.TargetDir}} | 当前版本: {{.CurrentVersion}}</p>
+      </div>
+      <form method="post" action="/logout">
+        <button class="px-4 py-2 rounded bg-slate-800 text-white hover:bg-slate-700">退出</button>
+      </form>
+    </header>
+
+    <section class="bg-white rounded-xl shadow p-4 space-y-3">
+      <div class="flex items-center justify-between">
+        <h2 class="text-lg font-semibold">系统配置</h2>
+        <span class="text-xs text-slate-500">保存后写入 config.json</span>
+      </div>
+      <form id="config-form" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <label class="block text-sm">
+          listen_addr
+          <input name="listen_addr" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          session_cookie
+          <input name="session_cookie" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          default_project_id（默认程序ID）
+          <input name="default_project_id" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono" />
+        </label>
+        <label class="block text-sm md:col-span-2 xl:col-span-3">
+          projects_json（多程序配置，JSON 数组）
+          <span class="mt-1 block text-xs text-slate-500">每个程序需包含: id/name/service_name/target_dir/current_version/max_upload_mb/backup_ignore/replace_ignore</span>
+          <textarea name="projects_json" rows="10" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"></textarea>
+        </label>
+        <label class="block text-sm">
+          current_version（当前运行版本）
+          <input name="current_version" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          service_name
+          <input name="service_name" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          target_dir
+          <input name="target_dir" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          upload_dir
+          <input name="upload_dir" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          work_dir
+          <input name="work_dir" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          backup_dir
+          <input name="backup_dir" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          deployments_file
+          <input name="deployments_file" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          log_file
+          <input name="log_file" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm">
+          max_upload_mb
+          <input name="max_upload_mb" type="number" min="1" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm md:col-span-2">
+          new_auth_key（可选，填写后会更新登录密钥）
+          <input name="new_auth_key" type="password" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label class="block text-sm md:col-span-2 xl:col-span-3">
+          backup_ignore_text（每行一个忽略规则）
+          <textarea name="backup_ignore_text" rows="4" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"></textarea>
+        </label>
+        <label class="block text-sm md:col-span-2 xl:col-span-3">
+          replace_ignore_text（替换忽略，每行一个；这些文件/目录在更新和回滚替换时不会被改动）
+          <textarea name="replace_ignore_text" rows="4" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"></textarea>
+        </label>
+        <div class="md:col-span-2 xl:col-span-3 flex items-center gap-3">
+          <button type="submit" class="px-4 py-2 rounded bg-sky-700 text-white hover:bg-sky-600">保存配置</button>
+          <span id="config-message" class="text-sm text-slate-600"></span>
+        </div>
+      </form>
+    </section>
+
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="bg-white rounded-xl shadow p-4 space-y-3">
+        <h2 class="text-lg font-semibold">上传部署包</h2>
+        <form id="upload-form" class="space-y-3">
+          <label class="block text-sm">
+            选择程序
+            <select id="project-select" name="project_id"
+                    class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white"></select>
+          </label>
+          <label class="block text-sm">
+            ZIP 包（最大 <span id="max-upload-label">{{.MaxUploadMB}}</span> MB）
+            <input type="file" name="package" accept=".zip" required
+                   class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
+          </label>
+          <label class="block text-sm">
+            目标版本（可选，不填则自动取下一版本）
+            <input id="target-version-input" name="target_version" placeholder="例如 0.1.1 或留空自动递增"
+                   class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
+            <span id="next-version-label" class="mt-1 block text-xs text-slate-500">默认下一版本: -</span>
+          </label>
+          <label class="block text-sm">
+            更新说明（可编辑）
+            <textarea name="note" rows="3" class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300"></textarea>
+          </label>
+          <button type="submit" class="px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-500">开始上传并部署</button>
+        </form>
+
+        <div class="space-y-1">
+          <div class="flex justify-between text-xs text-slate-500">
+            <span>上传进度</span>
+            <span id="upload-progress-label">0%</span>
+          </div>
+          <div class="h-2 rounded bg-slate-200 overflow-hidden">
+            <div id="upload-progress-bar" class="h-full w-0 bg-emerald-500 transition-all"></div>
+          </div>
+          <p id="upload-message" class="text-sm text-slate-600"></p>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl shadow p-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-semibold">实时日志</h2>
+          <span id="log-deployment-id" class="text-xs text-slate-500"></span>
+        </div>
+        <div id="log-panel" class="mt-3 h-72 overflow-auto rounded bg-slate-950 text-slate-100 text-xs p-3 font-mono"></div>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow p-4">
+      <div class="flex items-center justify-between">
+        <h2 class="text-lg font-semibold">部署记录</h2>
+        <button onclick="window.refreshDeployments()" class="text-sm px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">刷新</button>
+      </div>
+      <div id="deployments-container"
+           class="mt-3"
+           hx-get="/partials/deployments"
+           hx-trigger="load, every 5s"
+           hx-swap="innerHTML">
+      </div>
+    </section>
+  </div>
+
+  <dialog id="changes-dialog" class="w-[min(980px,96vw)] rounded-xl border border-slate-300 bg-white p-0">
+    <div class="p-4 border-b border-slate-300 flex items-center justify-between">
+      <div>
+        <h3 id="changes-dialog-title" class="text-base font-semibold">变更明细</h3>
+        <p id="changes-dialog-subtitle" class="text-xs text-slate-500"></p>
+      </div>
+      <button id="changes-dialog-close" class="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-100">关闭</button>
+    </div>
+    <div class="p-4 space-y-4">
+      <section>
+        <h4 class="text-sm font-semibold mb-2">替换忽略规则</h4>
+        <div id="changes-ignore-list" class="max-h-36 overflow-auto rounded border border-slate-300 p-2 text-xs font-mono bg-slate-50"></div>
+      </section>
+      <section>
+        <h4 class="text-sm font-semibold mb-2">文件变更明细</h4>
+        <div class="max-h-[46vh] overflow-auto rounded border border-slate-300">
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="border-b bg-slate-50">
+                <th class="px-2 py-2 text-left">动作</th>
+                <th class="px-2 py-2 text-left">文件</th>
+                <th class="px-2 py-2 text-left">大小</th>
+              </tr>
+            </thead>
+            <tbody id="changes-file-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
