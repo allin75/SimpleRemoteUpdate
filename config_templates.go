@@ -12,11 +12,13 @@ import (
 	"time"
 )
 
+const defaultAuthKey = "111"
+
 func defaultConfig() Config {
 	return Config{
 		ListenAddr:      ":8090",
 		SessionCookie:   "updater_session",
-		AuthKeySHA256:   sha256Hex("ChangeMe123!"),
+		AuthKeySHA256:   sha256Hex(defaultAuthKey),
 		CurrentVersion:  "0.0.1",
 		UploadDir:       "data/uploads",
 		WorkDir:         "data/work",
@@ -52,7 +54,7 @@ func loadConfig(path string) (Config, error) {
 		}
 	}
 	if cfg.AuthKeySHA256 == "" {
-		cfg.AuthKeySHA256 = sha256Hex("ChangeMe123!")
+		cfg.AuthKeySHA256 = sha256Hex(defaultAuthKey)
 	}
 	if strings.TrimSpace(cfg.CurrentVersion) == "" {
 		cfg.CurrentVersion = "0.0.1"
@@ -174,4 +176,9 @@ func isKeyMatch(expectedHash, input string) bool {
 		}
 	}
 	return matched == 1
+}
+
+func isDefaultAuthHash(hash string) bool {
+	want := strings.ToLower(strings.TrimSpace(hash))
+	return want == strings.ToLower(sha256Hex(defaultAuthKey))
 }

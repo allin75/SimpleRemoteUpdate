@@ -18,6 +18,7 @@
       <label class="block text-sm text-slate-700">
         密钥
         <input name="key" type="password" autocomplete="current-password" required
+               {{if .ShowDefaultPasswordTip}}placeholder="默认密码:111"{{end}}
                class="mt-1 w-full rounded border border-slate-300 px-3 py-2 outline-none focus:ring-2 focus:ring-slate-400"/>
       </label>
       <button type="submit"

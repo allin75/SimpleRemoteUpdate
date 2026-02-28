@@ -38,7 +38,7 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
-	if cfg.AuthKeySHA256 == sha256Hex("ChangeMe123!") {
+	if isDefaultAuthHash(cfg.AuthKeySHA256) {
 		logger.Warn("当前仍在使用默认密钥哈希，请尽快修改 config.json")
 	}
 
@@ -100,7 +100,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
-		_ = a.templates.ExecuteTemplate(w, "login.html", map[string]any{"Error": ""})
+		_ = a.templates.ExecuteTemplate(w, "login.html", map[string]any{
+			"Error":                  "",
+			"ShowDefaultPasswordTip": isDefaultAuthHash(cfg.AuthKeySHA256),
+		})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -114,7 +117,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	key := r.FormValue("key")
 	if !isKeyMatch(cfg.AuthKeySHA256, key) {
-		_ = a.templates.ExecuteTemplate(w, "login.html", map[string]any{"Error": "密钥错误"})
+		_ = a.templates.ExecuteTemplate(w, "login.html", map[string]any{
+			"Error":                  "密钥错误",
+			"ShowDefaultPasswordTip": isDefaultAuthHash(cfg.AuthKeySHA256),
+		})
 		return
 	}
 
