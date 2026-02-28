@@ -3,6 +3,10 @@
   const progressBar = document.getElementById("upload-progress-bar");
   const progressLabel = document.getElementById("upload-progress-label");
   const uploadMessage = document.getElementById("upload-message");
+  const selfUpdateForm = document.getElementById("self-update-form");
+  const selfUpdateProgressBar = document.getElementById("self-update-progress-bar");
+  const selfUpdateProgressLabel = document.getElementById("self-update-progress-label");
+  const selfUpdateMessage = document.getElementById("self-update-message");
   const logPanel = document.getElementById("log-panel");
   const logDeploymentId = document.getElementById("log-deployment-id");
   const deploymentsContainer = document.getElementById("deployments-container");
@@ -58,6 +62,10 @@
 
   function setCreateMessage(text) {
     setText(projectCreateMessage, text);
+  }
+
+  function setSelfUpdateMessage(text) {
+    setText(selfUpdateMessage, text);
   }
 
   function openDialog(dialogEl) {
@@ -125,6 +133,13 @@
     const p = Math.max(0, Math.min(100, Math.floor(percent)));
     progressBar.style.width = `${p}%`;
     progressLabel.textContent = `${p}%`;
+  }
+
+  function setSelfUpdateProgress(percent) {
+    if (!selfUpdateProgressBar || !selfUpdateProgressLabel) return;
+    const p = Math.max(0, Math.min(100, Math.floor(percent)));
+    selfUpdateProgressBar.style.width = `${p}%`;
+    selfUpdateProgressLabel.textContent = `${p}%`;
   }
 
   function getProjectByID(id) {
@@ -497,6 +512,80 @@
 
       xhr.onerror = () => {
         uploadMessage.textContent = "网络错误，上传失败";
+      };
+
+      xhr.send(formData);
+    });
+  }
+
+  if (selfUpdateForm) {
+    selfUpdateForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const formData = new FormData(selfUpdateForm);
+      if (!formData.get("package")) {
+        setSelfUpdateMessage("请选择新的 exe 文件");
+        return;
+      }
+      const targetVersion = `${formData.get("target_version") || ""}`.trim();
+      if (targetVersion && !isValidVersion(targetVersion)) {
+        setSelfUpdateMessage("版本号格式错误，示例: 0.0.2 / 0.1.1 / 1.0.1");
+        return;
+      }
+
+      setSelfUpdateProgress(0);
+      setSelfUpdateMessage("正在上传自更新包...");
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/self-update", true);
+      xhr.withCredentials = true;
+
+      xhr.upload.onprogress = (ev) => {
+        if (!ev.lengthComputable) return;
+        setSelfUpdateProgress((ev.loaded / ev.total) * 100);
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          let payload = {};
+          try {
+            payload = JSON.parse(xhr.responseText);
+          } catch (_err) {}
+          setSelfUpdateProgress(100);
+          setSelfUpdateMessage(
+            `自更新任务已创建: ${payload.id || "-"}。程序将自动重启，页面会在服务恢复后自动刷新。`
+          );
+          if (payload.id) {
+            connectLogs(payload.id);
+          }
+          refreshDeployments();
+          let attempts = 0;
+          const timer = window.setInterval(async () => {
+            attempts += 1;
+            try {
+              const res = await fetch("/api/config", { credentials: "same-origin" });
+              if (res.ok || res.status === 401) {
+                window.clearInterval(timer);
+                window.location.reload();
+                return;
+              }
+            } catch (_err) {}
+            if (attempts >= 60) {
+              window.clearInterval(timer);
+            }
+          }, 2000);
+          selfUpdateForm.reset();
+          return;
+        }
+        let msg = `自更新上传失败 (${xhr.status})`;
+        try {
+          const payload = JSON.parse(xhr.responseText);
+          if (payload.error) msg = payload.error;
+        } catch (_err) {}
+        setSelfUpdateMessage(msg);
+      };
+
+      xhr.onerror = () => {
+        setSelfUpdateMessage("网络错误，自更新上传失败");
       };
 
       xhr.send(formData);

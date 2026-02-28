@@ -114,7 +114,7 @@ func parseTemplates() (*template.Template, error) {
 				return "text-emerald-700"
 			case "failed":
 				return "text-rose-700"
-			case "deploying", "rollbacking", "queued":
+			case "deploying", "rollbacking", "queued", "self_updating", "switching":
 				return "text-amber-700"
 			default:
 				return "text-slate-700"

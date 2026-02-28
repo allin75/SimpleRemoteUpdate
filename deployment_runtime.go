@@ -314,6 +314,145 @@ func (a *App) runRollback(id, sourceID string) {
 	a.publish(id, "info", "回滚完成，耗时 %d ms", time.Since(start).Milliseconds())
 }
 
+func (a *App) runSelfUpdate(id string) {
+	defer atomic.StoreInt32(&a.deploying, 0)
+	defer func() {
+		if rec := recover(); rec != nil {
+			a.logger.Error("self-update panic", "deployment_id", id, "panic", rec)
+			_ = a.store.UpdateField(id, func(dep *Deployment) {
+				dep.Status = "failed"
+				now := time.Now()
+				dep.FinishedAt = &now
+				dep.DurationMs = now.Sub(dep.StartedAt).Milliseconds()
+				dep.Error = fmt.Sprintf("panic: %v", rec)
+			})
+			a.publish(id, "error", "自更新异常崩溃: %v", rec)
+		}
+	}()
+
+	dep, ok := a.store.Get(id)
+	if !ok {
+		return
+	}
+	cfg := a.currentConfig()
+	start := time.Now()
+	_ = a.store.UpdateField(id, func(d *Deployment) {
+		d.Status = "self_updating"
+		d.StartedAt = start
+	})
+
+	finish := func(status string, err error, changed []ChangedFile, backupPath string) {
+		now := time.Now()
+		_ = a.store.UpdateField(id, func(d *Deployment) {
+			d.Status = status
+			d.FinishedAt = &now
+			d.DurationMs = now.Sub(start).Milliseconds()
+			if len(changed) > 0 {
+				d.Changed = changed
+			}
+			if backupPath != "" {
+				d.BackupFile = backupPath
+			}
+			if err != nil {
+				d.Error = err.Error()
+			} else {
+				d.Error = ""
+			}
+		})
+	}
+
+	a.publish(id, "info", "SimpleRemoteUpdate 自更新开始")
+	exePath, err := os.Executable()
+	if err != nil {
+		finish("failed", fmt.Errorf("读取当前程序路径失败: %w", err), nil, "")
+		a.publish(id, "error", "读取当前程序路径失败: %v", err)
+		return
+	}
+	exePath, _ = filepath.Abs(exePath)
+	a.publish(id, "info", "当前程序路径: %s", exePath)
+
+	backupPath := filepath.Join(cfg.BackupDir, id+"-updater-old.exe")
+	a.publish(id, "info", "备份当前程序: %s", backupPath)
+	if err := copyFile(exePath, backupPath); err != nil {
+		finish("failed", fmt.Errorf("备份当前程序失败: %w", err), nil, "")
+		a.publish(id, "error", "备份当前程序失败: %v", err)
+		return
+	}
+
+	workDir := filepath.Join(cfg.WorkDir, id, "self-update")
+	_ = os.RemoveAll(workDir)
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		finish("failed", fmt.Errorf("创建自更新工作目录失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "创建自更新工作目录失败: %v", err)
+		return
+	}
+
+	stagedPath := filepath.Join(workDir, "updater.new.exe")
+	if err := copyFile(dep.UploadFile, stagedPath); err != nil {
+		finish("failed", fmt.Errorf("准备新版本文件失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "准备新版本文件失败: %v", err)
+		return
+	}
+	newSize := int64(0)
+	if info, statErr := os.Stat(stagedPath); statErr == nil {
+		newSize = info.Size()
+	}
+
+	workerPath := filepath.Join(workDir, "self-update-worker.exe")
+	if err := copyFile(exePath, workerPath); err != nil {
+		finish("failed", fmt.Errorf("准备自更新工作进程失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "准备自更新工作进程失败: %v", err)
+		return
+	}
+
+	changed := []ChangedFile{{
+		Path:   filepath.Base(exePath),
+		Action: "updated",
+		Size:   newSize,
+	}}
+	now := time.Now()
+	_ = a.store.UpdateField(id, func(d *Deployment) {
+		d.Status = "switching"
+		d.TargetDir = filepath.Dir(exePath)
+		d.BackupFile = backupPath
+		d.Changed = changed
+		d.FinishedAt = &now
+		d.DurationMs = now.Sub(start).Milliseconds()
+		d.Error = ""
+	})
+
+	args := []string{
+		workerPath,
+		"--self-update-worker",
+		"--target", exePath,
+		"--source", stagedPath,
+		"--backup", backupPath,
+		"--deployment-id", id,
+		"--deployments-file", cfg.DeploymentsFile,
+		"--log-file", cfg.LogFile,
+		"--wait-seconds", "120",
+	}
+
+	proc, err := os.StartProcess(workerPath, args, &os.ProcAttr{
+		Dir: workDir,
+		Files: []*os.File{
+			os.Stdin,
+			os.Stdout,
+			os.Stderr,
+		},
+	})
+	if err != nil {
+		finish("failed", fmt.Errorf("启动自更新工作进程失败: %w", err), changed, backupPath)
+		a.publish(id, "error", "启动自更新工作进程失败: %v", err)
+		return
+	}
+
+	a.publish(id, "info", "自更新工作进程已启动，PID=%d", proc.Pid)
+	a.publish(id, "warn", "当前进程即将退出，替换完成后将自动重启")
+	time.Sleep(1200 * time.Millisecond)
+	os.Exit(0)
+}
+
 func (a *App) publish(depID, level, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	switch level {

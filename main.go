@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,6 +19,15 @@ import (
 )
 
 func main() {
+	handled, err := tryRunSelfUpdateWorker(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "self-update worker failed: %v\n", err)
+		os.Exit(1)
+	}
+	if handled {
+		return
+	}
+
 	cfg, err := loadConfig("config.json")
 	if err != nil {
 		panic(err)
@@ -86,6 +96,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/partials/deployments", a.requireAuth(a.handleDeploymentsPartial))
 	mux.HandleFunc("/partials/deployments/rows", a.requireAuth(a.handleDeploymentsRows))
 	mux.HandleFunc("/api/upload", a.requireAuth(a.handleUpload))
+	mux.HandleFunc("/api/self-update", a.requireAuth(a.handleSelfUpdate))
 	mux.HandleFunc("/api/config", a.requireAuth(a.handleConfigAPI))
 	mux.HandleFunc("/api/projects", a.requireAuth(a.handleProjectsAPI))
 	mux.HandleFunc("/api/projects/", a.requireAuth(a.handleProjectItemAPI))
@@ -318,6 +329,104 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"version":      targetVersion,
 		"project_id":   project.ID,
 		"project_name": project.Name,
+	})
+}
+
+func (a *App) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if atomic.LoadInt32(&a.deploying) == 1 {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "当前已有任务在执行，请稍后再试"})
+		return
+	}
+
+	cfg := a.currentConfig()
+	maxMB := cfg.MaxUploadMB
+	if maxMB <= 0 {
+		maxMB = 1024
+	}
+	maxBytes := maxMB * 1024 * 1024
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("上传数据解析失败: %v", err)})
+		return
+	}
+
+	file, header, err := r.FormFile("package")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少上传文件字段 package"})
+		return
+	}
+	defer file.Close()
+	if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(header.Filename)), ".exe") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "自更新仅支持上传 .exe 文件"})
+		return
+	}
+	if header.Size > 0 && header.Size > maxBytes {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("文件超过上传限制: %d MB", maxMB)})
+		return
+	}
+
+	targetVersion := normalizeVersion(r.FormValue("target_version"))
+	if targetVersion != "" && !isValidVersion(targetVersion) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("版本号格式错误: %s，正确格式示例: 0.0.2 / 0.1.1 / 1.0.1", targetVersion)})
+		return
+	}
+
+	id := newID("self")
+	uploadPath := filepath.Join(cfg.UploadDir, id+".exe")
+	if err := saveMultipartFile(file, uploadPath); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("保存上传文件失败: %v", err)})
+		return
+	}
+	if info, statErr := os.Stat(uploadPath); statErr == nil && info.Size() > maxBytes {
+		_ = os.Remove(uploadPath)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("文件超过上传限制: %d MB", maxMB)})
+		return
+	}
+
+	if !atomic.CompareAndSwapInt32(&a.deploying, 0, 1) {
+		_ = os.Remove(uploadPath)
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "当前已有任务在执行，请稍后再试"})
+		return
+	}
+
+	now := time.Now()
+	dep := Deployment{
+		ID:          id,
+		Type:        "self_update",
+		Version:     targetVersion,
+		ProjectID:   "__self__",
+		ProjectName: "SimpleRemoteUpdate",
+		ReplaceMode: "self",
+		Status:      "queued",
+		Note:        strings.TrimSpace(r.FormValue("note")),
+		LoginIP:     clientIP(r),
+		CreatedAt:   now,
+		StartedAt:   now,
+		UploadFile:  uploadPath,
+	}
+	if dep.Note == "" {
+		dep.Note = "(未填写自更新说明)"
+	}
+
+	if err := a.store.Add(dep); err != nil {
+		atomic.StoreInt32(&a.deploying, 0)
+		_ = os.Remove(uploadPath)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("记录自更新任务失败: %v", err)})
+		return
+	}
+
+	go a.runSelfUpdate(id)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"id":           id,
+		"status":       "queued",
+		"version":      targetVersion,
+		"project_id":   "__self__",
+		"project_name": "SimpleRemoteUpdate",
+		"message":      "自更新任务已启动，程序将自动重启",
 	})
 }
 
@@ -1124,4 +1233,167 @@ func parsePageArgs(r *http.Request, defaultOffset, defaultLimit, maxLimit int) (
 		limit = maxLimit
 	}
 	return offset, limit
+}
+
+type selfUpdateWorkerOptions struct {
+	TargetPath      string
+	SourcePath      string
+	BackupPath      string
+	DeploymentID    string
+	DeploymentsFile string
+	LogFile         string
+	WaitSeconds     int
+}
+
+func tryRunSelfUpdateWorker(args []string) (bool, error) {
+	if len(args) == 0 || strings.TrimSpace(args[0]) != "--self-update-worker" {
+		return false, nil
+	}
+
+	fs := flag.NewFlagSet("self-update-worker", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	opts := selfUpdateWorkerOptions{}
+	fs.StringVar(&opts.TargetPath, "target", "", "target executable path")
+	fs.StringVar(&opts.SourcePath, "source", "", "staged new executable path")
+	fs.StringVar(&opts.BackupPath, "backup", "", "backup executable path")
+	fs.StringVar(&opts.DeploymentID, "deployment-id", "", "deployment id")
+	fs.StringVar(&opts.DeploymentsFile, "deployments-file", "", "deployments json file")
+	fs.StringVar(&opts.LogFile, "log-file", "", "log file")
+	fs.IntVar(&opts.WaitSeconds, "wait-seconds", 120, "wait seconds")
+	if err := fs.Parse(args[1:]); err != nil {
+		return true, err
+	}
+	return true, runSelfUpdateWorker(opts)
+}
+
+func runSelfUpdateWorker(opts selfUpdateWorkerOptions) error {
+	opts.TargetPath = strings.TrimSpace(opts.TargetPath)
+	opts.SourcePath = strings.TrimSpace(opts.SourcePath)
+	opts.BackupPath = strings.TrimSpace(opts.BackupPath)
+	opts.DeploymentID = strings.TrimSpace(opts.DeploymentID)
+	opts.DeploymentsFile = strings.TrimSpace(opts.DeploymentsFile)
+	opts.LogFile = strings.TrimSpace(opts.LogFile)
+	if opts.WaitSeconds <= 0 {
+		opts.WaitSeconds = 120
+	}
+
+	if opts.TargetPath == "" || opts.SourcePath == "" || opts.BackupPath == "" {
+		return errors.New("missing required args: --target --source --backup")
+	}
+
+	appendSelfUpdateLog(opts.LogFile, "[self-update] worker started: target=%s source=%s backup=%s", opts.TargetPath, opts.SourcePath, opts.BackupPath)
+	newSize := int64(0)
+	if info, err := os.Stat(opts.SourcePath); err == nil {
+		newSize = info.Size()
+	}
+
+	waitErr := waitAndSwapExecutable(opts, newSize)
+	if waitErr != nil {
+		appendSelfUpdateLog(opts.LogFile, "[self-update] failed: %v", waitErr)
+		_ = updateSelfUpdateResult(opts, "failed", waitErr.Error(), newSize)
+		return waitErr
+	}
+
+	appendSelfUpdateLog(opts.LogFile, "[self-update] executable swapped successfully")
+	if _, err := os.StartProcess(opts.TargetPath, []string{opts.TargetPath}, &os.ProcAttr{
+		Dir: filepath.Dir(opts.TargetPath),
+		Files: []*os.File{
+			os.Stdin,
+			os.Stdout,
+			os.Stderr,
+		},
+	}); err != nil {
+		appendSelfUpdateLog(opts.LogFile, "[self-update] restart failed: %v", err)
+		_ = updateSelfUpdateResult(opts, "failed", fmt.Sprintf("自更新完成但重启失败: %v", err), newSize)
+		return err
+	}
+
+	appendSelfUpdateLog(opts.LogFile, "[self-update] restart success")
+	_ = updateSelfUpdateResult(opts, "success", "", newSize)
+	return nil
+}
+
+func waitAndSwapExecutable(opts selfUpdateWorkerOptions, newSize int64) error {
+	if err := os.MkdirAll(filepath.Dir(opts.BackupPath), 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(opts.TargetPath), 0755); err != nil {
+		return err
+	}
+
+	var renameErr error
+	renamed := false
+	for i := 0; i < opts.WaitSeconds; i++ {
+		renameErr = os.Rename(opts.TargetPath, opts.BackupPath)
+		if renameErr == nil {
+			renamed = true
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if !renamed {
+		return fmt.Errorf("等待旧进程退出超时，无法替换程序: %w", renameErr)
+	}
+
+	if err := os.Rename(opts.SourcePath, opts.TargetPath); err != nil {
+		_ = os.Rename(opts.BackupPath, opts.TargetPath)
+		return fmt.Errorf("写入新版本失败: %w", err)
+	}
+
+	_ = newSize
+	return nil
+}
+
+func updateSelfUpdateResult(opts selfUpdateWorkerOptions, status, errMsg string, newSize int64) error {
+	if opts.DeploymentsFile == "" || opts.DeploymentID == "" {
+		return nil
+	}
+	var lastErr error
+	for i := 0; i < 20; i++ {
+		store, err := newDeploymentStore(opts.DeploymentsFile)
+		if err != nil {
+			lastErr = err
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		now := time.Now()
+		err = store.UpdateField(opts.DeploymentID, func(dep *Deployment) {
+			dep.Status = status
+			dep.FinishedAt = &now
+			if !dep.StartedAt.IsZero() {
+				dep.DurationMs = now.Sub(dep.StartedAt).Milliseconds()
+			}
+			dep.Error = errMsg
+			if newSize > 0 && len(dep.Changed) == 0 {
+				dep.Changed = []ChangedFile{{
+					Path:   filepath.Base(opts.TargetPath),
+					Action: "updated",
+					Size:   newSize,
+				}}
+			}
+		})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	return lastErr
+}
+
+func appendSelfUpdateLog(logFile, format string, args ...any) {
+	logFile = strings.TrimSpace(logFile)
+	if logFile == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	line := fmt.Sprintf(format, args...)
+	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), line)
 }

@@ -61,4 +61,5 @@ This project is a Go-based Windows remote updater with embedded web UI.
   - commit code changes with a clear Conventional Commit message;
   - push to GitHub remote branch (normally `origin/main`);
   - create/update GitHub Release with title format `SimpleRemoteUpdate <version>` (for example: `SimpleRemoteUpdate v0.1.2`) and include clear release notes about updated features/fixes.
+- Mandatory release rule: when pushing, Release name must be `SimpleRemoteUpdate + 版本号`, and the Release notes must clearly describe all updated features/fixes in this push; do not use vague notes.
 - Unless the user explicitly asks, do not commit runtime data (`data/`, `config.json`) with the push.
