@@ -59,5 +59,6 @@ This project is a Go-based Windows remote updater with embedded web UI.
   - summarize what features/fixes were updated in this round;
   - build executable with `go build -o updater.exe .`;
   - commit code changes with a clear Conventional Commit message;
-  - push to GitHub remote branch (normally `origin/main`).
+  - push to GitHub remote branch (normally `origin/main`);
+  - create/update GitHub Release with title format `SimpleRemoteUpdate <version>` (for example: `SimpleRemoteUpdate v0.1.2`) and include clear release notes about updated features/fixes.
 - Unless the user explicitly asks, do not commit runtime data (`data/`, `config.json`) with the push.
