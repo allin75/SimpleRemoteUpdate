@@ -30,6 +30,9 @@
   const openSystemConfigBtn = document.getElementById("open-system-config-btn");
   const systemConfigDialog = document.getElementById("system-config-dialog");
   const systemConfigClose = document.getElementById("system-config-close");
+  const openSelfUpdateBtn = document.getElementById("open-self-update-btn");
+  const selfUpdateDialog = document.getElementById("self-update-dialog");
+  const selfUpdateClose = document.getElementById("self-update-close");
 
   const projectCreateDialog = document.getElementById("project-create-dialog");
   const projectCreateForm = document.getElementById("project-create-form");
@@ -694,6 +697,31 @@
     openSystemConfigBtn.addEventListener("click", () => {
       setSystemMessage("");
       openDialog(systemConfigDialog);
+    });
+  }
+
+  if (openSelfUpdateBtn && selfUpdateDialog) {
+    openSelfUpdateBtn.addEventListener("click", () => {
+      setSelfUpdateMessage("");
+      setSelfUpdateProgress(0);
+      openDialog(selfUpdateDialog);
+    });
+  }
+
+  if (selfUpdateClose && selfUpdateDialog) {
+    selfUpdateClose.addEventListener("click", () => {
+      closeDialog(selfUpdateDialog);
+    });
+    selfUpdateDialog.addEventListener("click", (e) => {
+      const rect = selfUpdateDialog.getBoundingClientRect();
+      const inDialog =
+        rect.top <= e.clientY &&
+        e.clientY <= rect.top + rect.height &&
+        rect.left <= e.clientX &&
+        e.clientX <= rect.left + rect.width;
+      if (!inDialog) {
+        closeDialog(selfUpdateDialog);
+      }
     });
   }
 

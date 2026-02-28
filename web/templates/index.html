@@ -16,6 +16,7 @@
         <p id="runtime-summary" class="text-sm text-slate-500">服务: {{.ServiceName}} | 目录: {{.TargetDir}} | 当前版本: {{.CurrentVersion}}</p>
       </div>
       <div class="flex items-center gap-2">
+        <button id="open-self-update-btn" type="button" class="px-4 py-2 rounded border border-violet-300 text-violet-700 hover:bg-violet-50">自更新</button>
         <button id="open-system-config-btn" type="button" class="px-4 py-2 rounded border border-slate-300 hover:bg-slate-50">系统配置</button>
         <form method="post" action="/logout">
           <button class="px-4 py-2 rounded bg-slate-800 text-white hover:bg-slate-700">退出</button>
@@ -152,39 +153,6 @@
             <div id="upload-progress-bar" class="h-full w-0 bg-emerald-500 transition-all"></div>
           </div>
           <p id="upload-message" class="text-sm text-slate-600"></p>
-        </div>
-
-        <hr class="border-slate-200">
-
-        <h3 class="text-base font-semibold">SimpleRemoteUpdate 自更新</h3>
-        <form id="self-update-form" class="space-y-3">
-          <label class="block text-sm">
-            新版本 EXE（仅 `updater.exe`）
-            <input type="file" name="package" accept=".exe" required
-                   class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
-          </label>
-          <label class="block text-sm">
-            目标版本（可选）
-            <input name="target_version" placeholder="例如 0.1.3"
-                   class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
-          </label>
-          <label class="block text-sm">
-            更新说明（可选）
-            <textarea name="note" rows="2" class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300"></textarea>
-          </label>
-          <button type="submit" class="px-4 py-2 rounded bg-violet-700 text-white hover:bg-violet-600">上传并自更新</button>
-          <p class="text-xs text-slate-500">执行后当前进程会自动退出并重启，页面可能短暂断开。</p>
-        </form>
-
-        <div class="space-y-1">
-          <div class="flex justify-between text-xs text-slate-500">
-            <span>自更新上传进度</span>
-            <span id="self-update-progress-label">0%</span>
-          </div>
-          <div class="h-2 rounded bg-slate-200 overflow-hidden">
-            <div id="self-update-progress-bar" class="h-full w-0 bg-violet-500 transition-all"></div>
-          </div>
-          <p id="self-update-message" class="text-sm text-slate-600"></p>
         </div>
       </div>
 
@@ -328,6 +296,47 @@
         <span id="system-message" class="text-sm text-slate-600"></span>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="self-update-dialog" class="w-[min(780px,96vw)] rounded-xl border border-slate-300 bg-white p-0">
+    <div class="p-4 border-b border-slate-300 flex items-center justify-between">
+      <div>
+        <h3 class="text-base font-semibold">SimpleRemoteUpdate 自更新</h3>
+        <p class="text-xs text-slate-500">上传新的 updater.exe，自动替换并重启当前程序</p>
+      </div>
+      <button id="self-update-close" type="button" class="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-100">关闭</button>
+    </div>
+    <div class="p-4 space-y-3">
+      <form id="self-update-form" class="space-y-3">
+        <label class="block text-sm">
+          新版本 EXE（仅 `updater.exe`）
+          <input type="file" name="package" accept=".exe" required
+                 class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
+        </label>
+        <label class="block text-sm">
+          目标版本（可选）
+          <input name="target_version" placeholder="例如 0.1.3"
+                 class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
+        </label>
+        <label class="block text-sm">
+          更新说明（可选）
+          <textarea name="note" rows="2" class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300"></textarea>
+        </label>
+        <button type="submit" class="px-4 py-2 rounded bg-violet-700 text-white hover:bg-violet-600">上传并自更新</button>
+        <p class="text-xs text-slate-500">执行后当前进程会自动退出并重启，页面可能短暂断开。</p>
+      </form>
+
+      <div class="space-y-1">
+        <div class="flex justify-between text-xs text-slate-500">
+          <span>自更新上传进度</span>
+          <span id="self-update-progress-label">0%</span>
+        </div>
+        <div class="h-2 rounded bg-slate-200 overflow-hidden">
+          <div id="self-update-progress-bar" class="h-full w-0 bg-violet-500 transition-all"></div>
+        </div>
+        <p id="self-update-message" class="text-sm text-slate-600"></p>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="changes-dialog" class="w-[min(980px,96vw)] rounded-xl border border-slate-300 bg-white p-0">
