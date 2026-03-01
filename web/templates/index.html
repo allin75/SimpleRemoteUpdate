@@ -161,6 +161,15 @@
           <h2 class="text-lg font-semibold">实时日志</h2>
           <span id="log-deployment-id" class="text-xs text-slate-500"></span>
         </div>
+        <div class="space-y-1">
+          <div class="flex justify-between text-xs text-slate-500">
+            <span id="log-stage-label">阶段: -</span>
+            <span id="log-stage-progress-label">-</span>
+          </div>
+          <div class="h-2 rounded bg-slate-200 overflow-hidden">
+            <div id="log-stage-progress-bar" class="h-full w-0 bg-sky-500 transition-all"></div>
+          </div>
+        </div>
         <div id="log-panel" class="mt-3 h-72 overflow-auto rounded bg-slate-950 text-slate-100 text-xs p-3 font-mono"></div>
       </div>
     </section>
@@ -353,6 +362,10 @@
         <div id="changes-ignore-list" class="max-h-36 overflow-auto rounded border border-slate-300 p-2 text-xs font-mono bg-slate-50"></div>
       </section>
       <section>
+        <h4 class="text-sm font-semibold mb-2">忽略命中路径</h4>
+        <div id="changes-ignored-paths" class="max-h-32 overflow-auto rounded border border-slate-300 p-2 text-xs font-mono bg-slate-50"></div>
+      </section>
+      <section>
         <h4 class="text-sm font-semibold mb-2">文件变更明细</h4>
         <div class="max-h-[46vh] overflow-auto rounded border border-slate-300">
           <table class="w-full text-xs">
@@ -367,6 +380,11 @@
           </table>
         </div>
       </section>
+      <div id="changes-preview-actions" class="hidden border-t border-slate-200 pt-3 flex items-center justify-end gap-2">
+        <span id="changes-preview-hint" class="mr-auto text-xs text-amber-700"></span>
+        <button id="changes-preview-cancel" type="button" class="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-100">取消</button>
+        <button id="changes-preview-confirm" type="button" class="px-3 py-1.5 rounded bg-emerald-600 text-white text-sm hover:bg-emerald-500">确认部署</button>
+      </div>
     </div>
   </dialog>
 

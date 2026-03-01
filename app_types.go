@@ -81,9 +81,11 @@ const (
 )
 
 type Event struct {
-	Time  string `json:"time"`
-	Level string `json:"level"`
-	Text  string `json:"text"`
+	Time     string `json:"time"`
+	Level    string `json:"level"`
+	Text     string `json:"text"`
+	Stage    string `json:"stage,omitempty"`
+	Progress int    `json:"progress"`
 }
 
 type IgnoreMatcher struct {
@@ -91,15 +93,17 @@ type IgnoreMatcher struct {
 }
 
 type App struct {
-	cfg       Config
-	cfgPath   string
-	cfgMu     sync.RWMutex
-	logWriter *dynamicLogWriter
-	logger    *slog.Logger
-	templates *template.Template
-	store     *deploymentStore
-	sessions  *sessionManager
-	events    *eventHub
-	static    http.Handler
-	deploying int32
+	cfg         Config
+	cfgPath     string
+	cfgMu       sync.RWMutex
+	logWriter   *dynamicLogWriter
+	logger      *slog.Logger
+	templates   *template.Template
+	store       *deploymentStore
+	sessions    *sessionManager
+	events      *eventHub
+	static      http.Handler
+	taskMu      sync.Mutex
+	selfTask    bool
+	projectTask map[string]struct{}
 }

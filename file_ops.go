@@ -361,6 +361,128 @@ func syncDirectories(src, target string, ignore *IgnoreMatcher, removeMissing bo
 	return changes, nil
 }
 
+func previewDirectoryChanges(src, target string, ignore *IgnoreMatcher, removeMissing bool) ([]ChangedFile, []string, error) {
+	type srcFile struct {
+		abs  string
+		size int64
+	}
+	sourceFiles := make(map[string]srcFile)
+	ignoredSet := make(map[string]struct{})
+	addIgnored := func(rel string) {
+		rel = normalizeRelPath(rel)
+		if rel == "" {
+			return
+		}
+		ignoredSet[rel] = struct{}{}
+	}
+
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == src {
+			return nil
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		rel = normalizeRelPath(rel)
+		if ignore.ShouldIgnore(rel, d.IsDir()) {
+			addIgnored(rel)
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		sourceFiles[rel] = srcFile{abs: path, size: info.Size()}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	changes := make([]ChangedFile, 0)
+	if removeMissing {
+		err = filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == target {
+				return nil
+			}
+			rel, err := filepath.Rel(target, path)
+			if err != nil {
+				return err
+			}
+			rel = normalizeRelPath(rel)
+			if ignore.ShouldIgnore(rel, d.IsDir()) {
+				addIgnored(rel)
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if _, ok := sourceFiles[rel]; !ok {
+				changes = append(changes, ChangedFile{Path: rel, Action: "deleted", Size: 0})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	keys := make([]string, 0, len(sourceFiles))
+	for k := range sourceFiles {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, rel := range keys {
+		sf := sourceFiles[rel]
+		dst := filepath.Join(target, filepath.FromSlash(rel))
+		exists := true
+		if _, err := os.Stat(dst); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				exists = false
+			} else {
+				return nil, nil, err
+			}
+		}
+		same, err := filesEqual(sf.abs, dst)
+		if err != nil {
+			return nil, nil, err
+		}
+		if same {
+			continue
+		}
+		action := "added"
+		if exists {
+			action = "updated"
+		}
+		changes = append(changes, ChangedFile{Path: rel, Action: action, Size: sf.size})
+	}
+
+	ignoredPaths := make([]string, 0, len(ignoredSet))
+	for rel := range ignoredSet {
+		ignoredPaths = append(ignoredPaths, rel)
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	sort.Strings(ignoredPaths)
+	return changes, ignoredPaths, nil
+}
+
 func clearDirWithIgnore(target string, ignore *IgnoreMatcher) error {
 	type entry struct {
 		path  string

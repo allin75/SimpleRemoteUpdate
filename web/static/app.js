@@ -9,6 +9,9 @@
   const selfUpdateMessage = document.getElementById("self-update-message");
   const logPanel = document.getElementById("log-panel");
   const logDeploymentId = document.getElementById("log-deployment-id");
+  const logStageLabel = document.getElementById("log-stage-label");
+  const logStageProgressLabel = document.getElementById("log-stage-progress-label");
+  const logStageProgressBar = document.getElementById("log-stage-progress-bar");
   const deploymentsContainer = document.getElementById("deployments-container");
   const runtimeSummary = document.getElementById("runtime-summary");
   const maxUploadLabel = document.getElementById("max-upload-label");
@@ -43,13 +46,19 @@
   const changesDialogTitle = document.getElementById("changes-dialog-title");
   const changesDialogSubtitle = document.getElementById("changes-dialog-subtitle");
   const changesIgnoreList = document.getElementById("changes-ignore-list");
+  const changesIgnoredPaths = document.getElementById("changes-ignored-paths");
   const changesFileBody = document.getElementById("changes-file-body");
   const changesDialogClose = document.getElementById("changes-dialog-close");
+  const changesPreviewActions = document.getElementById("changes-preview-actions");
+  const changesPreviewHint = document.getElementById("changes-preview-hint");
+  const changesPreviewCancel = document.getElementById("changes-preview-cancel");
+  const changesPreviewConfirm = document.getElementById("changes-preview-confirm");
 
   let eventSource = null;
   let configCache = null;
   let projectsCache = [];
   let activeProjectId = "";
+  let pendingUploadPayload = null;
 
   function setText(el, text) {
     if (el) el.textContent = text;
@@ -143,6 +152,59 @@
     const p = Math.max(0, Math.min(100, Math.floor(percent)));
     selfUpdateProgressBar.style.width = `${p}%`;
     selfUpdateProgressLabel.textContent = `${p}%`;
+  }
+
+  function setLogStageProgress(stage, percent) {
+    const p = Number(percent);
+    const stageText = `${stage || ""}`.trim();
+    if (logStageLabel) {
+      logStageLabel.textContent = stageText ? `阶段: ${stageText}` : "阶段: -";
+    }
+    if (!Number.isFinite(p) || p < 0) {
+      if (logStageProgressLabel) logStageProgressLabel.textContent = "-";
+      return;
+    }
+    const safe = Math.max(0, Math.min(100, Math.floor(p)));
+    if (logStageProgressBar) {
+      logStageProgressBar.style.width = `${safe}%`;
+    }
+    if (logStageProgressLabel) {
+      logStageProgressLabel.textContent = `${safe}%`;
+    }
+  }
+
+  function cloneFormData(formData) {
+    const cloned = new FormData();
+    for (const [key, value] of formData.entries()) {
+      cloned.append(key, value);
+    }
+    return cloned;
+  }
+
+  function setPreviewActionsVisible(visible) {
+    if (!changesPreviewActions) return;
+    if (visible) {
+      changesPreviewActions.classList.remove("hidden");
+      return;
+    }
+    changesPreviewActions.classList.add("hidden");
+  }
+
+  function setPreviewHint(text) {
+    if (!changesPreviewHint) return;
+    changesPreviewHint.textContent = `${text || ""}`.trim();
+  }
+
+  function setPreviewConfirmLabel(text) {
+    if (!changesPreviewConfirm) return;
+    changesPreviewConfirm.textContent = `${text || ""}`.trim() || "确认部署";
+  }
+
+  function clearPendingUpload() {
+    pendingUploadPayload = null;
+    setPreviewActionsVisible(false);
+    setPreviewHint("");
+    setPreviewConfirmLabel("确认部署");
   }
 
   function getProjectByID(id) {
@@ -343,12 +405,16 @@
     if (!logPanel) return;
     logPanel.innerHTML = "";
     setText(logDeploymentId, `当前日志: ${id}`);
+    setLogStageProgress("", -1);
     appendLog(`[${new Date().toLocaleTimeString()}] 连接日志流...`);
     eventSource = new EventSource(`/api/deployments/${id}/events`);
     eventSource.onmessage = (e) => {
       try {
         const payload = JSON.parse(e.data);
         appendLog(`[${payload.time}] [${payload.level}] ${payload.text}`, payload.level);
+        if (payload && ((payload.stage && `${payload.stage}`.trim() !== "") || Number(payload.progress) >= 0)) {
+          setLogStageProgress(payload.stage || "", Number(payload.progress));
+        }
       } catch (_err) {
         appendLog(e.data);
       }
@@ -370,11 +436,98 @@
     } catch (_e) {}
   }
 
+  function renderChangesDialogData(dep, titleText) {
+    if (!changesDialog) return;
+    const changed = Array.isArray(dep?.changed) ? dep.changed : [];
+    let replaceIgnore = Array.isArray(dep?.replace_ignore) ? dep.replace_ignore : [];
+    const ignoredPaths = Array.isArray(dep?.ignored_paths) ? dep.ignored_paths : [];
+    if (replaceIgnore.length === 0 && projectForm) {
+      const raw = `${projectForm.elements.namedItem("replace_ignore_text")?.value || ""}`;
+      replaceIgnore = raw
+        .split("\n")
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0);
+    }
+
+    changesDialogTitle.textContent = titleText || "变更明细";
+    changesDialogSubtitle.textContent =
+      `程序: ${dep?.project_name || dep?.project_id || "-"} | 类型: ${dep?.type || "-"} | 版本: ${dep?.version || "-"} | 状态: ${dep?.status || "-"} | 替换模式: ${dep?.replace_mode || "full"}`;
+    if (`${dep?.type || ""}`.trim() === "preview" && changed.length === 0) {
+      changesDialogSubtitle.textContent += " | 结果: 无文件变更，建议取消本次部署";
+    }
+    changesIgnoreList.innerHTML = "";
+    if (changesIgnoredPaths) changesIgnoredPaths.innerHTML = "";
+    changesFileBody.innerHTML = "";
+
+    if (replaceIgnore.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "text-slate-500";
+      empty.textContent = "未配置替换忽略规则";
+      changesIgnoreList.appendChild(empty);
+    } else {
+      replaceIgnore.forEach((rule) => {
+        const row = document.createElement("div");
+        row.className = "break-all";
+        row.textContent = rule;
+        changesIgnoreList.appendChild(row);
+      });
+    }
+
+    if (ignoredPaths.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "text-slate-500";
+      empty.textContent = "无忽略命中路径";
+      if (changesIgnoredPaths) changesIgnoredPaths.appendChild(empty);
+    } else {
+      ignoredPaths.forEach((path) => {
+        const row = document.createElement("div");
+        row.className = "break-all";
+        row.textContent = path;
+        if (changesIgnoredPaths) changesIgnoredPaths.appendChild(row);
+      });
+    }
+
+    if (changed.length === 0) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 3;
+      td.className = "px-2 py-3 text-slate-500";
+      td.textContent = "无文件变更";
+      tr.appendChild(td);
+      changesFileBody.appendChild(tr);
+      return;
+    }
+
+    changed.forEach((item) => {
+      const tr = document.createElement("tr");
+      tr.className = "border-b border-slate-200";
+
+      const tdAction = document.createElement("td");
+      tdAction.className = `px-2 py-2 font-mono ${actionClass(item.action)}`;
+      tdAction.textContent = item.action || "-";
+
+      const tdPath = document.createElement("td");
+      tdPath.className = "px-2 py-2 font-mono break-all";
+      tdPath.textContent = item.path || "-";
+
+      const tdSize = document.createElement("td");
+      tdSize.className = "px-2 py-2 text-slate-500";
+      tdSize.textContent = item.action === "deleted" ? "-" : formatBytes(item.size);
+
+      tr.appendChild(tdAction);
+      tr.appendChild(tdPath);
+      tr.appendChild(tdSize);
+      changesFileBody.appendChild(tr);
+    });
+  }
+
   async function showChangesDialog(id) {
     if (!id || !changesDialog) return;
+    clearPendingUpload();
     changesDialogTitle.textContent = `变更明细 - ${id}`;
     changesDialogSubtitle.textContent = "加载中...";
     changesIgnoreList.innerHTML = "";
+    if (changesIgnoredPaths) changesIgnoredPaths.innerHTML = "";
     changesFileBody.innerHTML = "";
     openDialog(changesDialog);
     try {
@@ -384,62 +537,7 @@
         return;
       }
       const dep = await res.json();
-      const changed = Array.isArray(dep.changed) ? dep.changed : [];
-      let replaceIgnore = Array.isArray(dep.replace_ignore) ? dep.replace_ignore : [];
-      if (replaceIgnore.length === 0 && projectForm) {
-        const raw = `${projectForm.elements.namedItem("replace_ignore_text")?.value || ""}`;
-        replaceIgnore = raw
-          .split("\n")
-          .map((v) => v.trim())
-          .filter((v) => v.length > 0);
-      }
-      changesDialogSubtitle.textContent = `程序: ${dep.project_name || dep.project_id || "-"} | 类型: ${dep.type || "-"} | 版本: ${dep.version || "-"} | 状态: ${dep.status || "-"} | 替换模式: ${dep.replace_mode || "full"}`;
-
-      if (replaceIgnore.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "text-slate-500";
-        empty.textContent = "未配置替换忽略规则";
-        changesIgnoreList.appendChild(empty);
-      } else {
-        replaceIgnore.forEach((rule) => {
-          const row = document.createElement("div");
-          row.className = "break-all";
-          row.textContent = rule;
-          changesIgnoreList.appendChild(row);
-        });
-      }
-
-      if (changed.length === 0) {
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 3;
-        td.className = "px-2 py-3 text-slate-500";
-        td.textContent = "无文件变更";
-        tr.appendChild(td);
-        changesFileBody.appendChild(tr);
-      } else {
-        changed.forEach((item) => {
-          const tr = document.createElement("tr");
-          tr.className = "border-b border-slate-200";
-
-          const tdAction = document.createElement("td");
-          tdAction.className = `px-2 py-2 font-mono ${actionClass(item.action)}`;
-          tdAction.textContent = item.action || "-";
-
-          const tdPath = document.createElement("td");
-          tdPath.className = "px-2 py-2 font-mono break-all";
-          tdPath.textContent = item.path || "-";
-
-          const tdSize = document.createElement("td");
-          tdSize.className = "px-2 py-2 text-slate-500";
-          tdSize.textContent = item.action === "deleted" ? "-" : formatBytes(item.size);
-
-          tr.appendChild(tdAction);
-          tr.appendChild(tdPath);
-          tr.appendChild(tdSize);
-          changesFileBody.appendChild(tr);
-        });
-      }
+      renderChangesDialogData(dep, `变更明细 - ${id}`);
     } catch (_e) {
       changesDialogSubtitle.textContent = "加载失败";
     }
@@ -449,75 +547,125 @@
   window.updaterViewLogs = connectLogs;
   window.updaterShowChanges = showChangesDialog;
 
+  function buildUploadFormData() {
+    if (!uploadForm) return { ok: false, error: "上传表单不存在" };
+    const formData = new FormData(uploadForm);
+    const selectedID = `${formData.get("project_id") || activeProjectId || ""}`.trim();
+    if (!selectedID) {
+      return { ok: false, error: "请选择程序" };
+    }
+    formData.set("project_id", selectedID);
+    if (!formData.get("package")) {
+      return { ok: false, error: "请选择 zip 文件" };
+    }
+    const targetVersion = `${formData.get("target_version") || ""}`.trim();
+    if (targetVersion && !isValidVersion(targetVersion)) {
+      return { ok: false, error: "版本号格式错误，示例: 0.0.2 / 0.1.1 / 1.0.1" };
+    }
+    const replaceMode = `${formData.get("replace_mode") || ""}`.trim().toLowerCase();
+    if (replaceMode !== "full" && replaceMode !== "partial") {
+      formData.set("replace_mode", "full");
+    }
+    return { ok: true, selectedID, formData };
+  }
+
   if (projectSelect) {
     projectSelect.addEventListener("change", () => {
       selectProject(projectSelect.value, { syncUpload: false });
     });
   }
 
-  if (uploadForm) {
-    uploadForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const formData = new FormData(uploadForm);
-      const selectedID = `${formData.get("project_id") || activeProjectId || ""}`.trim();
-      if (!selectedID) {
-        uploadMessage.textContent = "请选择程序";
-        return;
-      }
-      formData.set("project_id", selectedID);
-      if (!formData.get("package")) {
-        uploadMessage.textContent = "请选择 zip 文件";
-        return;
-      }
-      const targetVersion = `${formData.get("target_version") || ""}`.trim();
-      if (targetVersion && !isValidVersion(targetVersion)) {
-        uploadMessage.textContent = "版本号格式错误，示例: 0.0.2 / 0.1.1 / 1.0.1";
-        return;
-      }
-      const replaceMode = `${formData.get("replace_mode") || ""}`.trim().toLowerCase();
-      if (replaceMode !== "full" && replaceMode !== "partial") {
-        formData.set("replace_mode", "full");
-      }
+  function executeUpload(formData, selectedID) {
+    setProgress(0);
+    uploadMessage.textContent = "正在上传...";
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload", true);
+    xhr.withCredentials = true;
 
-      setProgress(0);
-      uploadMessage.textContent = "正在上传...";
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/upload", true);
-      xhr.withCredentials = true;
+    xhr.upload.onprogress = (ev) => {
+      if (!ev.lengthComputable) return;
+      setProgress((ev.loaded / ev.total) * 100);
+    };
 
-      xhr.upload.onprogress = (ev) => {
-        if (!ev.lengthComputable) return;
-        setProgress((ev.loaded / ev.total) * 100);
-      };
-
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          let payload = {};
-          try {
-            payload = JSON.parse(xhr.responseText);
-          } catch (_err) {}
-          setProgress(100);
-          uploadMessage.textContent = `上传完成，任务ID: ${payload.id || "-"}，程序: ${payload.project_name || payload.project_id || "-"}，目标版本: ${payload.version || "-"}`;
-          if (payload.id) connectLogs(payload.id);
-          refreshDeployments();
-          loadConfig(selectedID, true);
-          uploadForm.reset();
-          if (projectSelect) projectSelect.value = selectedID;
-          return;
-        }
-        let msg = `上传失败 (${xhr.status})`;
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        let payload = {};
         try {
-          const payload = JSON.parse(xhr.responseText);
-          if (payload.error) msg = payload.error;
+          payload = JSON.parse(xhr.responseText);
         } catch (_err) {}
-        uploadMessage.textContent = msg;
-      };
+        setProgress(100);
+        uploadMessage.textContent = `上传完成，任务ID: ${payload.id || "-"}，程序: ${payload.project_name || payload.project_id || "-"}，目标版本: ${payload.version || "-"}`;
+        if (payload.id) connectLogs(payload.id);
+        refreshDeployments();
+        loadConfig(selectedID, true);
+        uploadForm.reset();
+        if (projectSelect) projectSelect.value = selectedID;
+        return;
+      }
+      let msg = `上传失败 (${xhr.status})`;
+      try {
+        const payload = JSON.parse(xhr.responseText);
+        if (payload.error) msg = payload.error;
+      } catch (_err) {}
+      uploadMessage.textContent = msg;
+    };
 
-      xhr.onerror = () => {
-        uploadMessage.textContent = "网络错误，上传失败";
-      };
+    xhr.onerror = () => {
+      uploadMessage.textContent = "网络错误，上传失败";
+    };
 
-      xhr.send(formData);
+    xhr.send(formData);
+  }
+
+  async function previewBeforeUpload(prepared) {
+    uploadMessage.textContent = "正在预演变更...";
+    try {
+      const res = await fetch("/api/preview", {
+        method: "POST",
+        body: cloneFormData(prepared.formData),
+        credentials: "same-origin",
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        uploadMessage.textContent = payload.error || `预演失败 (${res.status})`;
+        return;
+      }
+      renderChangesDialogData(
+        {
+          ...payload,
+          status: "preview",
+          type: "preview",
+        },
+        "预演结果（确认后才会部署）"
+      );
+      pendingUploadPayload = {
+        selectedID: prepared.selectedID,
+        formData: cloneFormData(prepared.formData),
+      };
+      if (Number(payload?.summary?.total || 0) === 0) {
+        setPreviewHint("预演结果无文件变更，建议取消本次部署。");
+        setPreviewConfirmLabel("仍然部署");
+      } else {
+        setPreviewHint("");
+        setPreviewConfirmLabel("确认部署");
+      }
+      setPreviewActionsVisible(true);
+      openDialog(changesDialog);
+      uploadMessage.textContent = `预演完成：共 ${payload?.summary?.total || 0} 项变更，请在弹窗确认部署`;
+    } catch (_e) {
+      uploadMessage.textContent = "预演失败";
+    }
+  }
+
+  if (uploadForm) {
+    uploadForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const prepared = buildUploadFormData();
+      if (!prepared.ok) {
+        uploadMessage.textContent = prepared.error || "上传参数不正确";
+        return;
+      }
+      await previewBeforeUpload(prepared);
     });
   }
 
@@ -768,8 +916,29 @@
     });
   }
 
+  if (changesPreviewCancel && changesDialog) {
+    changesPreviewCancel.addEventListener("click", () => {
+      clearPendingUpload();
+      closeDialog(changesDialog);
+    });
+  }
+
+  if (changesPreviewConfirm) {
+    changesPreviewConfirm.addEventListener("click", () => {
+      if (!pendingUploadPayload) {
+        uploadMessage.textContent = "未找到待确认的上传任务，请重新提交";
+        return;
+      }
+      const payload = pendingUploadPayload;
+      clearPendingUpload();
+      closeDialog(changesDialog);
+      executeUpload(cloneFormData(payload.formData), payload.selectedID);
+    });
+  }
+
   if (changesDialogClose && changesDialog) {
     changesDialogClose.addEventListener("click", () => {
+      clearPendingUpload();
       closeDialog(changesDialog);
     });
     changesDialog.addEventListener("click", (e) => {
@@ -780,6 +949,7 @@
         rect.left <= e.clientX &&
         e.clientX <= rect.left + rect.width;
       if (!inDialog) {
+        clearPendingUpload();
         closeDialog(changesDialog);
       }
     });

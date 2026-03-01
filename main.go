@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -66,15 +65,16 @@ func main() {
 	}
 
 	app := &App{
-		cfg:       cfg,
-		cfgPath:   "config.json",
-		logWriter: logWriter,
-		logger:    logger,
-		templates: tmpl,
-		store:     store,
-		sessions:  newSessionManager(),
-		events:    newEventHub(),
-		static:    http.FileServer(http.FS(staticFS)),
+		cfg:         cfg,
+		cfgPath:     "config.json",
+		logWriter:   logWriter,
+		logger:      logger,
+		templates:   tmpl,
+		store:       store,
+		sessions:    newSessionManager(),
+		events:      newEventHub(),
+		static:      http.FileServer(http.FS(staticFS)),
+		projectTask: make(map[string]struct{}),
 	}
 
 	logger.Info("updater server started",
@@ -96,6 +96,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/partials/deployments", a.requireAuth(a.handleDeploymentsPartial))
 	mux.HandleFunc("/partials/deployments/rows", a.requireAuth(a.handleDeploymentsRows))
 	mux.HandleFunc("/api/upload", a.requireAuth(a.handleUpload))
+	mux.HandleFunc("/api/preview", a.requireAuth(a.handlePreview))
 	mux.HandleFunc("/api/self-update", a.requireAuth(a.handleSelfUpdate))
 	mux.HandleFunc("/api/config", a.requireAuth(a.handleConfigAPI))
 	mux.HandleFunc("/api/projects", a.requireAuth(a.handleProjectsAPI))
@@ -203,10 +204,6 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := a.currentConfig()
-	if atomic.LoadInt32(&a.deploying) == 1 {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "当前已有部署任务在执行，请稍后再试"})
-		return
-	}
 
 	maxBytes := maxProjectUploadBytes(cfg)
 	if maxBytes <= 0 {
@@ -246,6 +243,17 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ok, reason := a.tryAcquireProjectTask(project.ID); !ok {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": reason})
+		return
+	}
+	locked := true
+	defer func() {
+		if locked {
+			a.releaseProjectTask(project.ID)
+		}
+	}()
+
 	id := newID("dep")
 	uploadPath := filepath.Join(cfg.UploadDir, id+".zip")
 	if err := saveMultipartFile(file, uploadPath); err != nil {
@@ -263,19 +271,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !atomic.CompareAndSwapInt32(&a.deploying, 0, 1) {
-		_ = os.Remove(uploadPath)
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "当前已有部署任务在执行，请稍后再试"})
-		return
-	}
-
 	now := time.Now()
 	requestVersion := normalizeVersion(r.FormValue("target_version"))
 	targetVersion := requestVersion
 	if targetVersion == "" {
 		nextVer, nextErr := nextPatchVersion(project.CurrentVersion)
 		if nextErr != nil {
-			atomic.StoreInt32(&a.deploying, 0)
 			_ = os.Remove(uploadPath)
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("当前版本格式错误，无法自动递增: %v", nextErr)})
 			return
@@ -283,7 +284,6 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		targetVersion = nextVer
 	}
 	if !isValidVersion(targetVersion) {
-		atomic.StoreInt32(&a.deploying, 0)
 		_ = os.Remove(uploadPath)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("版本号格式错误: %s，正确格式示例: 0.0.2 / 0.1.1 / 1.0.1", targetVersion)})
 		return
@@ -316,13 +316,13 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.store.Add(dep); err != nil {
-		atomic.StoreInt32(&a.deploying, 0)
 		_ = os.Remove(uploadPath)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("记录部署任务失败: %v", err)})
 		return
 	}
 
-	go a.runDeployment(id)
+	go a.runDeployment(id, project.ID)
+	locked = false
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id":           id,
 		"status":       "queued",
@@ -332,13 +332,118 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *App) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
+func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if atomic.LoadInt32(&a.deploying) == 1 {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "当前已有任务在执行，请稍后再试"})
+	cfg := a.currentConfig()
+	maxBytes := maxProjectUploadBytes(cfg)
+	if maxBytes <= 0 {
+		maxBytes = 1024 * 1024 * 1024
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("预演数据解析失败: %v", err)})
+		return
+	}
+
+	projectID := strings.TrimSpace(r.FormValue("project_id"))
+	if projectID == "" {
+		projectID = cfg.DefaultProjectID
+	}
+	project, found := findProjectByID(cfg.Projects, projectID)
+	if !found {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("未找到程序: %s", projectID)})
+		return
+	}
+
+	file, header, err := r.FormFile("package")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少上传文件字段 package"})
+		return
+	}
+	defer file.Close()
+	if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "预演仅支持 .zip 文件"})
+		return
+	}
+	projectMaxBytes := project.MaxUploadMB * 1024 * 1024
+	if header.Size > 0 && projectMaxBytes > 0 && header.Size > projectMaxBytes {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": fmt.Sprintf("文件超过程序 %s 的上传限制: %d MB", project.Name, project.MaxUploadMB),
+		})
+		return
+	}
+
+	replaceMode := normalizeReplaceMode(r.FormValue("replace_mode"))
+	if strings.TrimSpace(r.FormValue("replace_mode")) == "" {
+		replaceMode = normalizeReplaceMode(project.DefaultReplaceMode)
+	}
+	removeMissing := replaceMode == ReplaceModeFull
+
+	previewID := newID("preview")
+	workDir := filepath.Join(cfg.WorkDir, previewID)
+	extractDir := filepath.Join(workDir, "extract")
+	uploadPath := filepath.Join(workDir, "package.zip")
+	_ = os.RemoveAll(workDir)
+	defer os.RemoveAll(workDir)
+	if err := os.MkdirAll(extractDir, 0755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("创建预演目录失败: %v", err)})
+		return
+	}
+	if err := saveMultipartFile(file, uploadPath); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("保存预演上传文件失败: %v", err)})
+		return
+	}
+	if err := extractZip(uploadPath, extractDir); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("预演解压失败: %v", err)})
+		return
+	}
+
+	replaceRules := resolveReplaceIgnoreRulesForTarget(project.TargetDir, project.ReplaceIgnore, project.BackupIgnore)
+	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
+	changed, ignoredPaths, err := previewDirectoryChanges(extractDir, project.TargetDir, replaceIgnore, removeMissing)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("预演失败: %v", err)})
+		return
+	}
+
+	added := 0
+	updated := 0
+	deleted := 0
+	for _, c := range changed {
+		switch c.Action {
+		case "added":
+			added++
+		case "updated":
+			updated++
+		case "deleted":
+			deleted++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":             true,
+		"type":           "preview",
+		"project_id":     project.ID,
+		"project_name":   project.Name,
+		"replace_mode":   replaceMode,
+		"changed":        changed,
+		"replace_ignore": replaceRules,
+		"ignored_paths":  ignoredPaths,
+		"summary": map[string]any{
+			"total":         len(changed),
+			"added":         added,
+			"updated":       updated,
+			"deleted":       deleted,
+			"ignored_paths": len(ignoredPaths),
+		},
+	})
+}
+
+func (a *App) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -387,11 +492,17 @@ func (a *App) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !atomic.CompareAndSwapInt32(&a.deploying, 0, 1) {
+	if ok, reason := a.tryAcquireSelfTask(); !ok {
 		_ = os.Remove(uploadPath)
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "当前已有任务在执行，请稍后再试"})
+		writeJSON(w, http.StatusConflict, map[string]any{"error": reason})
 		return
 	}
+	locked := true
+	defer func() {
+		if locked {
+			a.releaseSelfTask()
+		}
+	}()
 
 	now := time.Now()
 	dep := Deployment{
@@ -413,13 +524,13 @@ func (a *App) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.store.Add(dep); err != nil {
-		atomic.StoreInt32(&a.deploying, 0)
 		_ = os.Remove(uploadPath)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("记录自更新任务失败: %v", err)})
 		return
 	}
 
 	go a.runSelfUpdate(id)
+	locked = false
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id":           id,
 		"status":       "queued",
@@ -534,10 +645,6 @@ func (a *App) handleUpdateNote(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (a *App) handleRollback(w http.ResponseWriter, r *http.Request, sourceID string) {
-	if atomic.LoadInt32(&a.deploying) == 1 {
-		http.Error(w, "当前已有任务在执行", http.StatusConflict)
-		return
-	}
 	source, ok := a.store.Get(sourceID)
 	if !ok {
 		http.Error(w, "deployment not found", http.StatusNotFound)
@@ -547,10 +654,21 @@ func (a *App) handleRollback(w http.ResponseWriter, r *http.Request, sourceID st
 		http.Error(w, "该部署记录没有备份文件，无法回滚", http.StatusBadRequest)
 		return
 	}
-	if !atomic.CompareAndSwapInt32(&a.deploying, 0, 1) {
-		http.Error(w, "当前已有任务在执行", http.StatusConflict)
+
+	projectID := strings.TrimSpace(source.ProjectID)
+	if projectID == "" {
+		projectID = a.currentConfig().DefaultProjectID
+	}
+	if ok, reason := a.tryAcquireProjectTask(projectID); !ok {
+		http.Error(w, reason, http.StatusConflict)
 		return
 	}
+	locked := true
+	defer func() {
+		if locked {
+			a.releaseProjectTask(projectID)
+		}
+	}()
 
 	now := time.Now()
 	id := newID("rb")
@@ -559,7 +677,7 @@ func (a *App) handleRollback(w http.ResponseWriter, r *http.Request, sourceID st
 		Type:          "rollback",
 		RollbackOf:    sourceID,
 		Version:       source.Version,
-		ProjectID:     source.ProjectID,
+		ProjectID:     projectID,
 		ProjectName:   source.ProjectName,
 		ReplaceMode:   source.ReplaceMode,
 		BackupIgnore:  append([]string{}, source.BackupIgnore...),
@@ -574,11 +692,11 @@ func (a *App) handleRollback(w http.ResponseWriter, r *http.Request, sourceID st
 		TargetDir:     source.TargetDir,
 	}
 	if err := a.store.Add(rollback); err != nil {
-		atomic.StoreInt32(&a.deploying, 0)
 		http.Error(w, "回滚任务创建失败", http.StatusInternalServerError)
 		return
 	}
-	go a.runRollback(id, sourceID)
+	go a.runRollback(id, sourceID, projectID)
+	locked = false
 	a.handleDeploymentsPartial(w, r)
 }
 
@@ -997,6 +1115,52 @@ func nextProjectID(projects []ManagedProject) string {
 			return candidate
 		}
 	}
+}
+
+func (a *App) tryAcquireProjectTask(projectID string) (bool, string) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "__default__"
+	}
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	if a.selfTask {
+		return false, "当前正在执行 SimpleRemoteUpdate 自更新，请稍后再试"
+	}
+	if _, exists := a.projectTask[projectID]; exists {
+		return false, fmt.Sprintf("程序 %s 当前已有任务在执行，请稍后再试", projectID)
+	}
+	a.projectTask[projectID] = struct{}{}
+	return true, ""
+}
+
+func (a *App) releaseProjectTask(projectID string) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "__default__"
+	}
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	delete(a.projectTask, projectID)
+}
+
+func (a *App) tryAcquireSelfTask() (bool, string) {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	if a.selfTask {
+		return false, "当前已有自更新任务在执行，请稍后再试"
+	}
+	if len(a.projectTask) > 0 {
+		return false, "当前有部署/回滚任务在执行，请稍后再试"
+	}
+	a.selfTask = true
+	return true, ""
+}
+
+func (a *App) releaseSelfTask() {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	a.selfTask = false
 }
 
 func (a *App) authUser(r *http.Request) (string, bool) {

@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"time"
 )
 
-func (a *App) runDeployment(id string) {
-	defer atomic.StoreInt32(&a.deploying, 0)
+func (a *App) runDeployment(id, projectID string) {
+	defer a.releaseProjectTask(projectID)
 	defer func() {
 		if rec := recover(); rec != nil {
 			a.logger.Error("deployment panic", "deployment_id", id, "panic", rec)
@@ -76,7 +75,7 @@ func (a *App) runDeployment(id string) {
 		})
 	}
 
-	a.publish(id, "info", "部署开始")
+	a.publishProgress(id, "info", "准备部署", 5, "部署开始")
 	backupRules := dep.BackupIgnore
 	if len(backupRules) == 0 {
 		backupRules = cfg.BackupIgnore
@@ -96,14 +95,14 @@ func (a *App) runDeployment(id string) {
 	}
 
 	backupPath := filepath.Join(cfg.BackupDir, id+".zip")
-	a.publish(id, "info", "开始备份目标目录")
+	a.publishProgress(id, "info", "备份目标目录", 15, "开始备份目标目录")
 	if err := zipDirectory(dep.TargetDir, backupPath, backupIgnore); err != nil {
 		finish("failed", fmt.Errorf("备份失败: %w", err), nil, "")
 		a.publish(id, "error", "备份失败: %v", err)
 		return
 	}
 	_ = a.store.UpdateField(id, func(d *Deployment) { d.BackupFile = backupPath })
-	a.publish(id, "info", "备份完成: %s", backupPath)
+	a.publishProgress(id, "info", "备份目标目录", 30, "备份完成: %s", backupPath)
 
 	workDir := filepath.Join(cfg.WorkDir, id)
 	extractDir := filepath.Join(workDir, "extract")
@@ -115,7 +114,7 @@ func (a *App) runDeployment(id string) {
 	}
 	defer os.RemoveAll(workDir)
 
-	a.publish(id, "info", "解压上传包")
+	a.publishProgress(id, "info", "解压上传包", 40, "解压上传包")
 	if err := extractZip(dep.UploadFile, extractDir); err != nil {
 		finish("failed", fmt.Errorf("解压失败: %w", err), nil, backupPath)
 		a.publish(id, "error", "解压失败: %v", err)
@@ -124,7 +123,7 @@ func (a *App) runDeployment(id string) {
 
 	serviceManaged := dep.ServiceName != ""
 	if serviceManaged {
-		a.publish(id, "info", "停止服务: %s", dep.ServiceName)
+		a.publishProgress(id, "info", "停止服务", 55, "停止服务: %s", dep.ServiceName)
 		if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
 			finish("failed", fmt.Errorf("停止服务失败: %w", err), nil, backupPath)
 			a.publish(id, "error", "停止服务失败: %v", err)
@@ -135,7 +134,7 @@ func (a *App) runDeployment(id string) {
 		a.publish(id, "warn", "service_name 为空，跳过停止服务，直接替换文件")
 	}
 
-	a.publish(id, "info", "开始替换文件")
+	a.publishProgress(id, "info", "替换文件", 70, "开始替换文件")
 	changed, err := syncDirectories(extractDir, dep.TargetDir, replaceIgnore, removeMissing)
 	if err != nil {
 		if serviceManaged {
@@ -147,10 +146,10 @@ func (a *App) runDeployment(id string) {
 		a.publish(id, "error", "替换文件失败: %v", err)
 		return
 	}
-	a.publish(id, "info", "文件替换完成，变更文件数: %d", len(changed))
+	a.publishProgress(id, "info", "替换文件", 82, "文件替换完成，变更文件数: %d", len(changed))
 
 	if serviceManaged {
-		a.publish(id, "info", "启动服务: %s", dep.ServiceName)
+		a.publishProgress(id, "info", "启动服务", 90, "启动服务: %s", dep.ServiceName)
 		if err := startService(dep.ServiceName, 45*time.Second); err != nil {
 			finish("failed", fmt.Errorf("启动服务失败: %w", err), changed, backupPath)
 			a.publish(id, "error", "启动服务失败: %v", err)
@@ -164,16 +163,16 @@ func (a *App) runDeployment(id string) {
 		if err := a.setProjectCurrentVersion(dep.ProjectID, dep.Version); err != nil {
 			a.publish(id, "warn", "部署成功，但写入当前版本失败: %v", err)
 		} else {
-			a.publish(id, "info", "当前版本已更新为: %s", dep.Version)
+			a.publishProgress(id, "info", "更新版本号", 95, "当前版本已更新为: %s", dep.Version)
 		}
 	}
 
 	finish("success", nil, changed, backupPath)
-	a.publish(id, "info", "部署完成，耗时 %d ms", time.Since(start).Milliseconds())
+	a.publishProgress(id, "info", "部署完成", 100, "部署完成，耗时 %d ms", time.Since(start).Milliseconds())
 }
 
-func (a *App) runRollback(id, sourceID string) {
-	defer atomic.StoreInt32(&a.deploying, 0)
+func (a *App) runRollback(id, sourceID, projectID string) {
+	defer a.releaseProjectTask(projectID)
 	defer func() {
 		if rec := recover(); rec != nil {
 			a.logger.Error("rollback panic", "deployment_id", id, "panic", rec)
@@ -251,11 +250,11 @@ func (a *App) runRollback(id, sourceID string) {
 		replaceRules = resolveReplaceIgnoreRulesForTarget(dep.TargetDir, cfg.ReplaceIgnore, cfg.BackupIgnore)
 	}
 	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
-	a.publish(id, "info", "回滚开始，目标记录: %s", sourceID)
+	a.publishProgress(id, "info", "准备回滚", 8, "回滚开始，目标记录: %s", sourceID)
 
 	serviceManaged := dep.ServiceName != ""
 	if serviceManaged {
-		a.publish(id, "info", "停止服务: %s", dep.ServiceName)
+		a.publishProgress(id, "info", "停止服务", 30, "停止服务: %s", dep.ServiceName)
 		if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
 			finish("failed", fmt.Errorf("停止服务失败: %w", err))
 			a.publish(id, "error", "停止服务失败: %v", err)
@@ -265,7 +264,7 @@ func (a *App) runRollback(id, sourceID string) {
 		a.publish(id, "warn", "service_name 为空，跳过停止服务，直接回滚文件")
 	}
 
-	a.publish(id, "info", "清理目标目录（保留忽略项）")
+	a.publishProgress(id, "info", "清理目标目录", 50, "清理目标目录（保留忽略项）")
 	if err := clearDirWithIgnore(dep.TargetDir, replaceIgnore); err != nil {
 		if serviceManaged {
 			_ = startService(dep.ServiceName, 45*time.Second)
@@ -275,7 +274,7 @@ func (a *App) runRollback(id, sourceID string) {
 		return
 	}
 
-	a.publish(id, "info", "恢复备份包: %s", dep.BackupFile)
+	a.publishProgress(id, "info", "恢复备份包", 70, "恢复备份包: %s", dep.BackupFile)
 	if err := extractZip(dep.BackupFile, dep.TargetDir); err != nil {
 		if serviceManaged {
 			if restartErr := startService(dep.ServiceName, 45*time.Second); restartErr != nil {
@@ -288,7 +287,7 @@ func (a *App) runRollback(id, sourceID string) {
 	}
 
 	if serviceManaged {
-		a.publish(id, "info", "启动服务: %s", dep.ServiceName)
+		a.publishProgress(id, "info", "启动服务", 90, "启动服务: %s", dep.ServiceName)
 		if err := startService(dep.ServiceName, 45*time.Second); err != nil {
 			finish("failed", fmt.Errorf("启动服务失败: %w", err))
 			a.publish(id, "error", "启动服务失败: %v", err)
@@ -306,16 +305,16 @@ func (a *App) runRollback(id, sourceID string) {
 		if err := a.setProjectCurrentVersion(projectID, source.Version); err != nil {
 			a.publish(id, "warn", "回滚成功，但写入当前版本失败: %v", err)
 		} else {
-			a.publish(id, "info", "当前版本已回滚为: %s", source.Version)
+			a.publishProgress(id, "info", "更新版本号", 95, "当前版本已回滚为: %s", source.Version)
 		}
 	}
 
 	finish("success", nil)
-	a.publish(id, "info", "回滚完成，耗时 %d ms", time.Since(start).Milliseconds())
+	a.publishProgress(id, "info", "回滚完成", 100, "回滚完成，耗时 %d ms", time.Since(start).Milliseconds())
 }
 
 func (a *App) runSelfUpdate(id string) {
-	defer atomic.StoreInt32(&a.deploying, 0)
+	defer a.releaseSelfTask()
 	defer func() {
 		if rec := recover(); rec != nil {
 			a.logger.Error("self-update panic", "deployment_id", id, "panic", rec)
@@ -361,7 +360,7 @@ func (a *App) runSelfUpdate(id string) {
 		})
 	}
 
-	a.publish(id, "info", "SimpleRemoteUpdate 自更新开始")
+	a.publishProgress(id, "info", "准备自更新", 10, "SimpleRemoteUpdate 自更新开始")
 	exePath, err := os.Executable()
 	if err != nil {
 		finish("failed", fmt.Errorf("读取当前程序路径失败: %w", err), nil, "")
@@ -372,7 +371,7 @@ func (a *App) runSelfUpdate(id string) {
 	a.publish(id, "info", "当前程序路径: %s", exePath)
 
 	backupPath := filepath.Join(cfg.BackupDir, id+"-updater-old.exe")
-	a.publish(id, "info", "备份当前程序: %s", backupPath)
+	a.publishProgress(id, "info", "备份当前程序", 35, "备份当前程序: %s", backupPath)
 	if err := copyFile(exePath, backupPath); err != nil {
 		finish("failed", fmt.Errorf("备份当前程序失败: %w", err), nil, "")
 		a.publish(id, "error", "备份当前程序失败: %v", err)
@@ -387,6 +386,7 @@ func (a *App) runSelfUpdate(id string) {
 		return
 	}
 
+	a.publishProgress(id, "info", "准备新版本文件", 55, "准备新版本文件")
 	stagedPath := filepath.Join(workDir, "updater.new.exe")
 	if err := copyFile(dep.UploadFile, stagedPath); err != nil {
 		finish("failed", fmt.Errorf("准备新版本文件失败: %w", err), nil, backupPath)
@@ -399,6 +399,7 @@ func (a *App) runSelfUpdate(id string) {
 	}
 
 	workerPath := filepath.Join(workDir, "self-update-worker.exe")
+	a.publishProgress(id, "info", "准备更新工作进程", 72, "准备更新工作进程")
 	if err := copyFile(exePath, workerPath); err != nil {
 		finish("failed", fmt.Errorf("准备自更新工作进程失败: %w", err), nil, backupPath)
 		a.publish(id, "error", "准备自更新工作进程失败: %v", err)
@@ -447,14 +448,24 @@ func (a *App) runSelfUpdate(id string) {
 		return
 	}
 
-	a.publish(id, "info", "自更新工作进程已启动，PID=%d", proc.Pid)
-	a.publish(id, "warn", "当前进程即将退出，替换完成后将自动重启")
+	a.publishProgress(id, "info", "切换新版本", 90, "自更新工作进程已启动，PID=%d", proc.Pid)
+	a.publishProgress(id, "warn", "切换新版本", 96, "当前进程即将退出，替换完成后将自动重启")
 	time.Sleep(1200 * time.Millisecond)
 	os.Exit(0)
 }
 
 func (a *App) publish(depID, level, format string, args ...any) {
+	a.publishProgress(depID, level, "", -1, format, args...)
+}
+
+func (a *App) publishProgress(depID, level, stage string, progress int, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
+	if progress > 100 {
+		progress = 100
+	}
+	if progress < -1 {
+		progress = -1
+	}
 	switch level {
 	case "error":
 		a.logger.Error(msg, "deployment_id", depID)
@@ -464,8 +475,10 @@ func (a *App) publish(depID, level, format string, args ...any) {
 		a.logger.Info(msg, "deployment_id", depID)
 	}
 	a.events.Publish(depID, Event{
-		Time:  time.Now().Format("15:04:05"),
-		Level: level,
-		Text:  msg,
+		Time:     time.Now().Format("15:04:05"),
+		Level:    level,
+		Text:     msg,
+		Stage:    stage,
+		Progress: progress,
 	})
 }
