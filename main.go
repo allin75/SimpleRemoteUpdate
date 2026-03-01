@@ -384,11 +384,10 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 
 	previewID := newID("preview")
 	workDir := filepath.Join(cfg.WorkDir, previewID)
-	extractDir := filepath.Join(workDir, "extract")
 	uploadPath := filepath.Join(workDir, "package.zip")
 	_ = os.RemoveAll(workDir)
 	defer os.RemoveAll(workDir)
-	if err := os.MkdirAll(extractDir, 0755); err != nil {
+	if err := os.MkdirAll(workDir, 0755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("创建预演目录失败: %v", err)})
 		return
 	}
@@ -396,14 +395,10 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("保存预演上传文件失败: %v", err)})
 		return
 	}
-	if err := extractZip(uploadPath, extractDir); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("预演解压失败: %v", err)})
-		return
-	}
 
 	replaceRules := resolveReplaceIgnoreRulesForTarget(project.TargetDir, project.ReplaceIgnore, project.BackupIgnore)
 	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
-	changed, ignoredPaths, err := previewDirectoryChanges(extractDir, project.TargetDir, replaceIgnore, removeMissing)
+	changed, ignoredPaths, err := previewZipChanges(uploadPath, project.TargetDir, replaceIgnore, removeMissing)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("预演失败: %v", err)})
 		return

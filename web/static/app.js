@@ -618,43 +618,88 @@
   }
 
   async function previewBeforeUpload(prepared) {
-    uploadMessage.textContent = "正在预演变更...";
-    try {
-      const res = await fetch("/api/preview", {
-        method: "POST",
-        body: cloneFormData(prepared.formData),
-        credentials: "same-origin",
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        uploadMessage.textContent = payload.error || `预演失败 (${res.status})`;
-        return;
-      }
-      renderChangesDialogData(
-        {
-          ...payload,
-          status: "preview",
-          type: "preview",
-        },
-        "预演结果（确认后才会部署）"
-      );
-      pendingUploadPayload = {
-        selectedID: prepared.selectedID,
-        formData: cloneFormData(prepared.formData),
+    await new Promise((resolve) => {
+      let analyzeTimer = null;
+      let analyzeProgress = 60;
+      setProgress(0);
+      uploadMessage.textContent = "正在上传预演包...";
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/preview", true);
+      xhr.withCredentials = true;
+
+      xhr.upload.onprogress = (ev) => {
+        if (!ev.lengthComputable) return;
+        // 预演进度前 60% 显示上传进度
+        const p = Math.max(0, Math.min(60, Math.floor((ev.loaded / ev.total) * 60)));
+        setProgress(p);
       };
-      if (Number(payload?.summary?.total || 0) === 0) {
-        setPreviewHint("预演结果无文件变更，建议取消本次部署。");
-        setPreviewConfirmLabel("仍然部署");
-      } else {
-        setPreviewHint("");
-        setPreviewConfirmLabel("确认部署");
-      }
-      setPreviewActionsVisible(true);
-      openDialog(changesDialog);
-      uploadMessage.textContent = `预演完成：共 ${payload?.summary?.total || 0} 项变更，请在弹窗确认部署`;
-    } catch (_e) {
-      uploadMessage.textContent = "预演失败";
-    }
+
+      xhr.upload.onloadend = () => {
+        setProgress(60);
+        uploadMessage.textContent = "服务器正在分析变更...";
+        analyzeTimer = window.setInterval(() => {
+          analyzeProgress = Math.min(95, analyzeProgress + 1);
+          setProgress(analyzeProgress);
+        }, 160);
+      };
+
+      xhr.onload = () => {
+        if (analyzeTimer) {
+          window.clearInterval(analyzeTimer);
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          let payload = {};
+          try {
+            payload = JSON.parse(xhr.responseText);
+          } catch (_err) {}
+          setProgress(100);
+          renderChangesDialogData(
+            {
+              ...payload,
+              status: "preview",
+              type: "preview",
+            },
+            "预演结果（确认后才会部署）"
+          );
+          pendingUploadPayload = {
+            selectedID: prepared.selectedID,
+            formData: cloneFormData(prepared.formData),
+          };
+          if (Number(payload?.summary?.total || 0) === 0) {
+            setPreviewHint("预演结果无文件变更，建议取消本次部署。");
+            setPreviewConfirmLabel("仍然部署");
+          } else {
+            setPreviewHint("");
+            setPreviewConfirmLabel("确认部署");
+          }
+          setPreviewActionsVisible(true);
+          openDialog(changesDialog);
+          uploadMessage.textContent = `预演完成：共 ${payload?.summary?.total || 0} 项变更，请在弹窗确认部署`;
+          resolve();
+          return;
+        }
+        let msg = `预演失败 (${xhr.status})`;
+        try {
+          const payload = JSON.parse(xhr.responseText);
+          if (payload.error) msg = payload.error;
+        } catch (_err) {}
+        uploadMessage.textContent = msg;
+        setProgress(0);
+        resolve();
+      };
+
+      xhr.onerror = () => {
+        if (analyzeTimer) {
+          window.clearInterval(analyzeTimer);
+        }
+        uploadMessage.textContent = "网络错误，预演失败";
+        setProgress(0);
+        resolve();
+      };
+
+      xhr.send(cloneFormData(prepared.formData));
+    });
   }
 
   if (uploadForm) {

@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"mime/multipart"
@@ -481,6 +482,138 @@ func previewDirectoryChanges(src, target string, ignore *IgnoreMatcher, removeMi
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
 	sort.Strings(ignoredPaths)
 	return changes, ignoredPaths, nil
+}
+
+func previewZipChanges(zipPath, target string, ignore *IgnoreMatcher, removeMissing bool) ([]ChangedFile, []string, error) {
+	type srcFile struct {
+		size int64
+		crc  uint32
+	}
+	sourceFiles := make(map[string]srcFile)
+	sourceDirs := map[string]struct{}{"": {}}
+	ignoredSet := make(map[string]struct{})
+	addIgnored := func(rel string) {
+		rel = normalizeRelPath(rel)
+		if rel == "" {
+			return
+		}
+		ignoredSet[rel] = struct{}{}
+	}
+
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		name := normalizeRelPath(f.Name)
+		if name == "" {
+			continue
+		}
+		isDir := f.FileInfo().IsDir() || strings.HasSuffix(strings.TrimSpace(f.Name), "/")
+		if ignore.ShouldIgnore(name, isDir) {
+			addIgnored(name)
+			continue
+		}
+		if isDir {
+			sourceDirs[name] = struct{}{}
+			continue
+		}
+		sourceFiles[name] = srcFile{
+			size: int64(f.UncompressedSize64),
+			crc:  f.CRC32,
+		}
+		sourceDirs[pathpkg.Dir(name)] = struct{}{}
+	}
+
+	changes := make([]ChangedFile, 0)
+	if removeMissing {
+		err = filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == target {
+				return nil
+			}
+			rel, err := filepath.Rel(target, path)
+			if err != nil {
+				return err
+			}
+			rel = normalizeRelPath(rel)
+			if ignore.ShouldIgnore(rel, d.IsDir()) {
+				addIgnored(rel)
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				if _, ok := sourceDirs[rel]; !ok {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if _, ok := sourceFiles[rel]; !ok {
+				changes = append(changes, ChangedFile{Path: rel, Action: "deleted", Size: 0})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	keys := make([]string, 0, len(sourceFiles))
+	for k := range sourceFiles {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, rel := range keys {
+		sf := sourceFiles[rel]
+		dst := filepath.Join(target, filepath.FromSlash(rel))
+		stat, err := os.Stat(dst)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				changes = append(changes, ChangedFile{Path: rel, Action: "added", Size: sf.size})
+				continue
+			}
+			return nil, nil, err
+		}
+		if stat.Size() != sf.size {
+			changes = append(changes, ChangedFile{Path: rel, Action: "updated", Size: sf.size})
+			continue
+		}
+		crc, err := fileCRC32(dst)
+		if err != nil {
+			return nil, nil, err
+		}
+		if crc != sf.crc {
+			changes = append(changes, ChangedFile{Path: rel, Action: "updated", Size: sf.size})
+		}
+	}
+
+	ignoredPaths := make([]string, 0, len(ignoredSet))
+	for rel := range ignoredSet {
+		ignoredPaths = append(ignoredPaths, rel)
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	sort.Strings(ignoredPaths)
+	return changes, ignoredPaths, nil
+}
+
+func fileCRC32(path string) (uint32, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	h := crc32.NewIEEE()
+	if _, err := io.Copy(h, f); err != nil {
+		return 0, err
+	}
+	return h.Sum32(), nil
 }
 
 func clearDirWithIgnore(target string, ignore *IgnoreMatcher) error {
