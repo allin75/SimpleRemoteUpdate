@@ -16,21 +16,22 @@ const defaultAuthKey = "111"
 
 func defaultConfig() Config {
 	return Config{
-		ListenAddr:      ":8090",
-		SessionCookie:   "updater_session",
-		AuthKeySHA256:   sha256Hex(defaultAuthKey),
-		CurrentVersion:  "0.0.1",
-		UploadDir:       "data/uploads",
-		WorkDir:         "data/work",
-		BackupDir:       "data/backups",
-		DeploymentsFile: "data/deployments.json",
-		LogFile:         "data/updater.log",
-		ServiceName:     "YourServiceName",
-		TargetDir:       "C:/YourApp",
-		ReplaceMode:     ReplaceModeFull,
-		BackupIgnore:    []string{"logs/", "temp/", "*.log"},
-		ReplaceIgnore:   []string{"logs/", "temp/", "*.log"},
-		MaxUploadMB:     1024,
+		ListenAddr:            ":8090",
+		SessionCookie:         "updater_session",
+		AuthKeySHA256:         sha256Hex(defaultAuthKey),
+		CurrentVersion:        "0.0.1",
+		UploadDir:             "data/uploads",
+		WorkDir:               "data/work",
+		BackupDir:             "data/backups",
+		DeploymentsFile:       "data/deployments.json",
+		LogFile:               "data/updater.log",
+		SelfUpdateServiceName: "",
+		ServiceName:           "YourServiceName",
+		TargetDir:             "C:/YourApp",
+		ReplaceMode:           ReplaceModeFull,
+		BackupIgnore:          []string{"logs/", "temp/", "*.log"},
+		ReplaceIgnore:         []string{"logs/", "temp/", "*.log"},
+		MaxUploadMB:           1024,
 	}
 }
 

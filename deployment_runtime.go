@@ -5,7 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+)
+
+const (
+	postStopSettleDelay = 2 * time.Second
+	fileOpRetryTimes    = 5
+	fileOpRetryDelay    = 1500 * time.Millisecond
 )
 
 func (a *App) runDeployment(id, projectID string) {
@@ -130,12 +137,18 @@ func (a *App) runDeployment(id, projectID string) {
 			return
 		}
 		a.publish(id, "info", "服务已停止")
+		a.waitAfterServiceStop(id, "替换文件", 60, dep.ServiceName)
 	} else {
 		a.publish(id, "warn", "service_name 为空，跳过停止服务，直接替换文件")
 	}
 
 	a.publishProgress(id, "info", "替换文件", 70, "开始替换文件")
-	changed, err := syncDirectories(extractDir, dep.TargetDir, replaceIgnore, removeMissing)
+	var changed []ChangedFile
+	err := a.runFileOpWithRetry(id, "替换文件", 70, "替换文件", func() error {
+		var syncErr error
+		changed, syncErr = syncDirectories(extractDir, dep.TargetDir, replaceIgnore, removeMissing)
+		return syncErr
+	})
 	if err != nil {
 		if serviceManaged {
 			if restartErr := startService(dep.ServiceName, 45*time.Second); restartErr != nil {
@@ -260,12 +273,15 @@ func (a *App) runRollback(id, sourceID, projectID string) {
 			a.publish(id, "error", "停止服务失败: %v", err)
 			return
 		}
+		a.waitAfterServiceStop(id, "清理目标目录", 40, dep.ServiceName)
 	} else {
 		a.publish(id, "warn", "service_name 为空，跳过停止服务，直接回滚文件")
 	}
 
 	a.publishProgress(id, "info", "清理目标目录", 50, "清理目标目录（保留忽略项）")
-	if err := clearDirWithIgnore(dep.TargetDir, replaceIgnore); err != nil {
+	if err := a.runFileOpWithRetry(id, "清理目标目录", 50, "清理目标目录", func() error {
+		return clearDirWithIgnore(dep.TargetDir, replaceIgnore)
+	}); err != nil {
 		if serviceManaged {
 			_ = startService(dep.ServiceName, 45*time.Second)
 		}
@@ -275,7 +291,9 @@ func (a *App) runRollback(id, sourceID, projectID string) {
 	}
 
 	a.publishProgress(id, "info", "恢复备份包", 70, "恢复备份包: %s", dep.BackupFile)
-	if err := extractZip(dep.BackupFile, dep.TargetDir); err != nil {
+	if err := a.runFileOpWithRetry(id, "恢复备份包", 70, "恢复备份包", func() error {
+		return extractZip(dep.BackupFile, dep.TargetDir)
+	}); err != nil {
 		if serviceManaged {
 			if restartErr := startService(dep.ServiceName, 45*time.Second); restartErr != nil {
 				err = fmt.Errorf("%v; 尝试恢复启动服务失败: %v", err, restartErr)
@@ -371,6 +389,11 @@ func (a *App) runSelfUpdate(id string) {
 	a.publish(id, "info", "当前程序路径: %s", exePath)
 
 	backupPath := filepath.Join(cfg.BackupDir, id+"-updater-old.exe")
+	if backupPath, err = filepath.Abs(backupPath); err != nil {
+		finish("failed", fmt.Errorf("解析备份路径失败: %w", err), nil, "")
+		a.publish(id, "error", "解析备份路径失败: %v", err)
+		return
+	}
 	a.publishProgress(id, "info", "备份当前程序", 35, "备份当前程序: %s", backupPath)
 	if err := copyFile(exePath, backupPath); err != nil {
 		finish("failed", fmt.Errorf("备份当前程序失败: %w", err), nil, "")
@@ -379,6 +402,11 @@ func (a *App) runSelfUpdate(id string) {
 	}
 
 	workDir := filepath.Join(cfg.WorkDir, id, "self-update")
+	if workDir, err = filepath.Abs(workDir); err != nil {
+		finish("failed", fmt.Errorf("解析自更新工作目录失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "解析自更新工作目录失败: %v", err)
+		return
+	}
 	_ = os.RemoveAll(workDir)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		finish("failed", fmt.Errorf("创建自更新工作目录失败: %w", err), nil, backupPath)
@@ -405,6 +433,24 @@ func (a *App) runSelfUpdate(id string) {
 		a.publish(id, "error", "准备自更新工作进程失败: %v", err)
 		return
 	}
+	deploymentsFile := cfg.DeploymentsFile
+	if deploymentsFile, err = filepath.Abs(deploymentsFile); err != nil {
+		finish("failed", fmt.Errorf("解析 deployments_file 路径失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "解析 deployments_file 路径失败: %v", err)
+		return
+	}
+	logFile := cfg.LogFile
+	if logFile, err = filepath.Abs(logFile); err != nil {
+		finish("failed", fmt.Errorf("解析 log_file 路径失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "解析 log_file 路径失败: %v", err)
+		return
+	}
+	selfUpdateServiceName := resolveSelfUpdateServiceName(cfg)
+	if selfUpdateServiceName != "" {
+		a.publish(id, "info", "自更新将通过服务重启: %s", selfUpdateServiceName)
+	} else {
+		a.publish(id, "warn", "未检测到自更新服务名，回退为进程直启方式重启")
+	}
 
 	changed := []ChangedFile{{
 		Path:   filepath.Base(exePath),
@@ -429,19 +475,29 @@ func (a *App) runSelfUpdate(id string) {
 		"--source", stagedPath,
 		"--backup", backupPath,
 		"--deployment-id", id,
-		"--deployments-file", cfg.DeploymentsFile,
-		"--log-file", cfg.LogFile,
+		"--deployments-file", deploymentsFile,
+		"--log-file", logFile,
 		"--wait-seconds", "120",
 	}
+	if selfUpdateServiceName != "" {
+		args = append(args, "--service-name", selfUpdateServiceName)
+	}
 
-	proc, err := os.StartProcess(workerPath, args, &os.ProcAttr{
+	procAttr := &os.ProcAttr{
 		Dir: workDir,
 		Files: []*os.File{
 			os.Stdin,
 			os.Stdout,
 			os.Stderr,
 		},
-	})
+		Sys: selfUpdateWorkerSysProcAttr(),
+	}
+	proc, err := os.StartProcess(workerPath, args, procAttr)
+	if err != nil && procAttr.Sys != nil {
+		a.publish(id, "warn", "使用 breakaway 模式启动自更新工作进程失败，回退普通启动: %v", err)
+		procAttr.Sys = nil
+		proc, err = os.StartProcess(workerPath, args, procAttr)
+	}
 	if err != nil {
 		finish("failed", fmt.Errorf("启动自更新工作进程失败: %w", err), changed, backupPath)
 		a.publish(id, "error", "启动自更新工作进程失败: %v", err)
@@ -452,6 +508,41 @@ func (a *App) runSelfUpdate(id string) {
 	a.publishProgress(id, "warn", "切换新版本", 96, "当前进程即将退出，替换完成后将自动重启")
 	time.Sleep(1200 * time.Millisecond)
 	os.Exit(0)
+}
+
+func resolveSelfUpdateServiceName(cfg Config) string {
+	if v := strings.TrimSpace(cfg.SelfUpdateServiceName); v != "" {
+		return v
+	}
+	for _, key := range []string{"NSSM_SERVICE_NAME", "SERVICE_NAME", "UPDATER_SERVICE_NAME"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (a *App) waitAfterServiceStop(depID, stage string, progress int, serviceName string) {
+	a.publishProgress(depID, "info", stage, progress, "服务已停止，等待 %.1f 秒释放文件句柄: %s", postStopSettleDelay.Seconds(), serviceName)
+	time.Sleep(postStopSettleDelay)
+}
+
+func (a *App) runFileOpWithRetry(depID, stage string, progress int, opName string, fn func() error) error {
+	var lastErr error
+	for attempt := 1; attempt <= fileOpRetryTimes; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			if attempt > 1 {
+				a.publishProgress(depID, "info", stage, progress, "%s重试后成功（第 %d 次）", opName, attempt)
+			}
+			return nil
+		}
+		if attempt < fileOpRetryTimes {
+			a.publish(depID, "warn", "%s失败（第 %d/%d 次）: %v；%dms 后重试", opName, attempt, fileOpRetryTimes, lastErr, fileOpRetryDelay.Milliseconds())
+			time.Sleep(fileOpRetryDelay)
+		}
+	}
+	return fmt.Errorf("%s重试 %d 次后仍失败: %w", opName, fileOpRetryTimes, lastErr)
 }
 
 func (a *App) publish(depID, level, format string, args ...any) {

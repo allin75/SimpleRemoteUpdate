@@ -296,6 +296,11 @@
         <input name="log_file" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
       </label>
       <label class="block text-sm md:col-span-2 xl:col-span-3">
+        self_update_service_name（可选，NSSM 服务名，用于自更新时停启服务）
+        <input name="self_update_service_name" placeholder="例如 updater-service"
+               class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+      </label>
+      <label class="block text-sm md:col-span-2 xl:col-span-3">
         new_auth_key（可选，填写后会更新登录密钥）
         <input name="new_auth_key" type="password" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
       </label>

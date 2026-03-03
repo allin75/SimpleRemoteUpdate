@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"syscall"
 	"time"
 )
 
@@ -16,3 +17,6 @@ func startServiceImpl(_ context.Context, _ string, _ time.Duration) error {
 	return errors.New("当前平台不支持 windows 服务控制")
 }
 
+func selfUpdateWorkerSysProcAttr() *syscall.SysProcAttr {
+	return nil
+}

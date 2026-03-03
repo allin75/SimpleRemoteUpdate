@@ -13,23 +13,24 @@ import (
 var webAssets embed.FS
 
 type Config struct {
-	ListenAddr       string           `json:"listen_addr"`
-	SessionCookie    string           `json:"session_cookie"`
-	AuthKeySHA256    string           `json:"auth_key_sha256"`
-	CurrentVersion   string           `json:"current_version"`
-	DefaultProjectID string           `json:"default_project_id"`
-	Projects         []ManagedProject `json:"projects"`
-	UploadDir        string           `json:"upload_dir"`
-	WorkDir          string           `json:"work_dir"`
-	BackupDir        string           `json:"backup_dir"`
-	DeploymentsFile  string           `json:"deployments_file"`
-	LogFile          string           `json:"log_file"`
-	ServiceName      string           `json:"service_name"`
-	TargetDir        string           `json:"target_dir"`
-	ReplaceMode      string           `json:"replace_mode"`
-	BackupIgnore     []string         `json:"backup_ignore"`
-	ReplaceIgnore    []string         `json:"replace_ignore"`
-	MaxUploadMB      int64            `json:"max_upload_mb"`
+	ListenAddr            string           `json:"listen_addr"`
+	SessionCookie         string           `json:"session_cookie"`
+	AuthKeySHA256         string           `json:"auth_key_sha256"`
+	CurrentVersion        string           `json:"current_version"`
+	DefaultProjectID      string           `json:"default_project_id"`
+	Projects              []ManagedProject `json:"projects"`
+	UploadDir             string           `json:"upload_dir"`
+	WorkDir               string           `json:"work_dir"`
+	BackupDir             string           `json:"backup_dir"`
+	DeploymentsFile       string           `json:"deployments_file"`
+	LogFile               string           `json:"log_file"`
+	SelfUpdateServiceName string           `json:"self_update_service_name"`
+	ServiceName           string           `json:"service_name"`
+	TargetDir             string           `json:"target_dir"`
+	ReplaceMode           string           `json:"replace_mode"`
+	BackupIgnore          []string         `json:"backup_ignore"`
+	ReplaceIgnore         []string         `json:"replace_ignore"`
+	MaxUploadMB           int64            `json:"max_upload_mb"`
 }
 
 type ManagedProject struct {

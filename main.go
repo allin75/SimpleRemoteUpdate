@@ -732,6 +732,9 @@ func (a *App) handleSaveSystemConfig(w http.ResponseWriter, r *http.Request) {
 	newCfg.BackupDir = strings.TrimSpace(r.FormValue("backup_dir"))
 	newCfg.DeploymentsFile = strings.TrimSpace(r.FormValue("deployments_file"))
 	newCfg.LogFile = strings.TrimSpace(r.FormValue("log_file"))
+	if _, ok := r.Form["self_update_service_name"]; ok {
+		newCfg.SelfUpdateServiceName = strings.TrimSpace(r.FormValue("self_update_service_name"))
+	}
 
 	defaultProjectID := strings.TrimSpace(r.FormValue("default_project_id"))
 	if defaultProjectID != "" {
@@ -993,24 +996,25 @@ func configSnapshot(cfg Config) map[string]any {
 	projectsJSON, _ := json.MarshalIndent(cfg.Projects, "", "  ")
 	dp := getDefaultProject(cfg)
 	return map[string]any{
-		"listen_addr":          cfg.ListenAddr,
-		"session_cookie":       cfg.SessionCookie,
-		"default_project_id":   cfg.DefaultProjectID,
-		"projects_json":        string(projectsJSON),
-		"projects":             cfg.Projects,
-		"current_version":      dp.CurrentVersion,
-		"upload_dir":           cfg.UploadDir,
-		"work_dir":             cfg.WorkDir,
-		"backup_dir":           cfg.BackupDir,
-		"deployments_file":     cfg.DeploymentsFile,
-		"log_file":             cfg.LogFile,
-		"service_name":         dp.ServiceName,
-		"target_dir":           dp.TargetDir,
-		"replace_mode":         dp.DefaultReplaceMode,
-		"default_replace_mode": dp.DefaultReplaceMode,
-		"backup_ignore_text":   strings.Join(dp.BackupIgnore, "\n"),
-		"replace_ignore_text":  strings.Join(dp.ReplaceIgnore, "\n"),
-		"max_upload_mb":        dp.MaxUploadMB,
+		"listen_addr":              cfg.ListenAddr,
+		"session_cookie":           cfg.SessionCookie,
+		"default_project_id":       cfg.DefaultProjectID,
+		"projects_json":            string(projectsJSON),
+		"projects":                 cfg.Projects,
+		"current_version":          dp.CurrentVersion,
+		"upload_dir":               cfg.UploadDir,
+		"work_dir":                 cfg.WorkDir,
+		"backup_dir":               cfg.BackupDir,
+		"deployments_file":         cfg.DeploymentsFile,
+		"log_file":                 cfg.LogFile,
+		"self_update_service_name": cfg.SelfUpdateServiceName,
+		"service_name":             dp.ServiceName,
+		"target_dir":               dp.TargetDir,
+		"replace_mode":             dp.DefaultReplaceMode,
+		"default_replace_mode":     dp.DefaultReplaceMode,
+		"backup_ignore_text":       strings.Join(dp.BackupIgnore, "\n"),
+		"replace_ignore_text":      strings.Join(dp.ReplaceIgnore, "\n"),
+		"max_upload_mb":            dp.MaxUploadMB,
 	}
 }
 
@@ -1401,8 +1405,19 @@ type selfUpdateWorkerOptions struct {
 	DeploymentID    string
 	DeploymentsFile string
 	LogFile         string
+	ServiceName     string
 	WaitSeconds     int
 }
+
+const (
+	selfUpdateSwapSettleDelay   = 1500 * time.Millisecond
+	selfUpdateReplaceRetryTimes = 5
+	selfUpdateReplaceRetryDelay = 1200 * time.Millisecond
+	selfUpdateRestartDelay      = 2000 * time.Millisecond
+	selfUpdateRestartRetryTimes = 5
+	selfUpdateRestartRetryDelay = 2000 * time.Millisecond
+	selfUpdateServiceOpTimeout  = 90 * time.Second
+)
 
 func tryRunSelfUpdateWorker(args []string) (bool, error) {
 	if len(args) == 0 || strings.TrimSpace(args[0]) != "--self-update-worker" {
@@ -1418,6 +1433,7 @@ func tryRunSelfUpdateWorker(args []string) (bool, error) {
 	fs.StringVar(&opts.DeploymentID, "deployment-id", "", "deployment id")
 	fs.StringVar(&opts.DeploymentsFile, "deployments-file", "", "deployments json file")
 	fs.StringVar(&opts.LogFile, "log-file", "", "log file")
+	fs.StringVar(&opts.ServiceName, "service-name", "", "self updater service name")
 	fs.IntVar(&opts.WaitSeconds, "wait-seconds", 120, "wait seconds")
 	if err := fs.Parse(args[1:]); err != nil {
 		return true, err
@@ -1432,6 +1448,7 @@ func runSelfUpdateWorker(opts selfUpdateWorkerOptions) error {
 	opts.DeploymentID = strings.TrimSpace(opts.DeploymentID)
 	opts.DeploymentsFile = strings.TrimSpace(opts.DeploymentsFile)
 	opts.LogFile = strings.TrimSpace(opts.LogFile)
+	opts.ServiceName = strings.TrimSpace(opts.ServiceName)
 	if opts.WaitSeconds <= 0 {
 		opts.WaitSeconds = 120
 	}
@@ -1441,12 +1458,21 @@ func runSelfUpdateWorker(opts selfUpdateWorkerOptions) error {
 	}
 
 	appendSelfUpdateLog(opts.LogFile, "[self-update] worker started: target=%s source=%s backup=%s", opts.TargetPath, opts.SourcePath, opts.BackupPath)
+	if opts.ServiceName != "" {
+		appendSelfUpdateLog(opts.LogFile, "[self-update] service-aware mode enabled: service=%s", opts.ServiceName)
+		if err := stopService(opts.ServiceName, selfUpdateServiceOpTimeout); err != nil {
+			appendSelfUpdateLog(opts.LogFile, "[self-update] stop service failed: %v", err)
+			_ = updateSelfUpdateResult(opts, "failed", fmt.Sprintf("停止自更新服务失败(%s): %v", opts.ServiceName, err), 0)
+			return err
+		}
+		appendSelfUpdateLog(opts.LogFile, "[self-update] service stopped: %s", opts.ServiceName)
+	}
 	newSize := int64(0)
 	if info, err := os.Stat(opts.SourcePath); err == nil {
 		newSize = info.Size()
 	}
 
-	waitErr := waitAndSwapExecutable(opts, newSize)
+	waitErr := waitAndSwapExecutable(opts)
 	if waitErr != nil {
 		appendSelfUpdateLog(opts.LogFile, "[self-update] failed: %v", waitErr)
 		_ = updateSelfUpdateResult(opts, "failed", waitErr.Error(), newSize)
@@ -1454,17 +1480,20 @@ func runSelfUpdateWorker(opts selfUpdateWorkerOptions) error {
 	}
 
 	appendSelfUpdateLog(opts.LogFile, "[self-update] executable swapped successfully")
-	if _, err := os.StartProcess(opts.TargetPath, []string{opts.TargetPath}, &os.ProcAttr{
-		Dir: filepath.Dir(opts.TargetPath),
-		Files: []*os.File{
-			os.Stdin,
-			os.Stdout,
-			os.Stderr,
-		},
-	}); err != nil {
-		appendSelfUpdateLog(opts.LogFile, "[self-update] restart failed: %v", err)
-		_ = updateSelfUpdateResult(opts, "failed", fmt.Sprintf("自更新完成但重启失败: %v", err), newSize)
-		return err
+	appendSelfUpdateLog(opts.LogFile, "[self-update] wait %.1fs before restart", selfUpdateRestartDelay.Seconds())
+	time.Sleep(selfUpdateRestartDelay)
+	if opts.ServiceName != "" {
+		if err := startSelfUpdateServiceWithRetry(opts); err != nil {
+			appendSelfUpdateLog(opts.LogFile, "[self-update] service restart failed after retries: %v", err)
+			_ = updateSelfUpdateResult(opts, "failed", fmt.Sprintf("自更新完成但服务重启失败(%s): %v", opts.ServiceName, err), newSize)
+			return err
+		}
+	} else {
+		if err := restartSelfUpdatedProcess(opts); err != nil {
+			appendSelfUpdateLog(opts.LogFile, "[self-update] restart failed after retries: %v", err)
+			_ = updateSelfUpdateResult(opts, "failed", fmt.Sprintf("自更新完成但重启失败: %v", err), newSize)
+			return err
+		}
 	}
 
 	appendSelfUpdateLog(opts.LogFile, "[self-update] restart success")
@@ -1472,7 +1501,7 @@ func runSelfUpdateWorker(opts selfUpdateWorkerOptions) error {
 	return nil
 }
 
-func waitAndSwapExecutable(opts selfUpdateWorkerOptions, newSize int64) error {
+func waitAndSwapExecutable(opts selfUpdateWorkerOptions) error {
 	if err := os.MkdirAll(filepath.Dir(opts.BackupPath), 0755); err != nil {
 		return err
 	}
@@ -1493,14 +1522,69 @@ func waitAndSwapExecutable(opts selfUpdateWorkerOptions, newSize int64) error {
 	if !renamed {
 		return fmt.Errorf("等待旧进程退出超时，无法替换程序: %w", renameErr)
 	}
+	appendSelfUpdateLog(opts.LogFile, "[self-update] old process exited, wait %.1fs before swapping executable", selfUpdateSwapSettleDelay.Seconds())
+	time.Sleep(selfUpdateSwapSettleDelay)
 
-	if err := os.Rename(opts.SourcePath, opts.TargetPath); err != nil {
-		_ = os.Rename(opts.BackupPath, opts.TargetPath)
-		return fmt.Errorf("写入新版本失败: %w", err)
+	var replaceErr error
+	for attempt := 1; attempt <= selfUpdateReplaceRetryTimes; attempt++ {
+		replaceErr = os.Rename(opts.SourcePath, opts.TargetPath)
+		if replaceErr == nil {
+			if attempt > 1 {
+				appendSelfUpdateLog(opts.LogFile, "[self-update] executable swap succeeded on retry %d/%d", attempt, selfUpdateReplaceRetryTimes)
+			}
+			return nil
+		}
+		if attempt < selfUpdateReplaceRetryTimes {
+			appendSelfUpdateLog(opts.LogFile, "[self-update] executable swap failed (%d/%d): %v; retry in %dms", attempt, selfUpdateReplaceRetryTimes, replaceErr, selfUpdateReplaceRetryDelay.Milliseconds())
+			time.Sleep(selfUpdateReplaceRetryDelay)
+		}
 	}
+	_ = os.Rename(opts.BackupPath, opts.TargetPath)
+	return fmt.Errorf("写入新版本失败，重试 %d 次后仍失败: %w", selfUpdateReplaceRetryTimes, replaceErr)
+}
 
-	_ = newSize
-	return nil
+func restartSelfUpdatedProcess(opts selfUpdateWorkerOptions) error {
+	var lastErr error
+	for attempt := 1; attempt <= selfUpdateRestartRetryTimes; attempt++ {
+		if _, err := os.StartProcess(opts.TargetPath, []string{opts.TargetPath}, &os.ProcAttr{
+			Dir: filepath.Dir(opts.TargetPath),
+			Files: []*os.File{
+				os.Stdin,
+				os.Stdout,
+				os.Stderr,
+			},
+		}); err == nil {
+			if attempt > 1 {
+				appendSelfUpdateLog(opts.LogFile, "[self-update] restart succeeded on retry %d/%d", attempt, selfUpdateRestartRetryTimes)
+			}
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt < selfUpdateRestartRetryTimes {
+			appendSelfUpdateLog(opts.LogFile, "[self-update] restart attempt failed (%d/%d): %v; retry in %dms", attempt, selfUpdateRestartRetryTimes, lastErr, selfUpdateRestartRetryDelay.Milliseconds())
+			time.Sleep(selfUpdateRestartRetryDelay)
+		}
+	}
+	return fmt.Errorf("重启失败，重试 %d 次后仍失败: %w", selfUpdateRestartRetryTimes, lastErr)
+}
+
+func startSelfUpdateServiceWithRetry(opts selfUpdateWorkerOptions) error {
+	var lastErr error
+	for attempt := 1; attempt <= selfUpdateRestartRetryTimes; attempt++ {
+		lastErr = startService(opts.ServiceName, selfUpdateServiceOpTimeout)
+		if lastErr == nil {
+			if attempt > 1 {
+				appendSelfUpdateLog(opts.LogFile, "[self-update] service restart succeeded on retry %d/%d", attempt, selfUpdateRestartRetryTimes)
+			}
+			return nil
+		}
+		if attempt < selfUpdateRestartRetryTimes {
+			appendSelfUpdateLog(opts.LogFile, "[self-update] service restart failed (%d/%d): %v; retry in %dms", attempt, selfUpdateRestartRetryTimes, lastErr, selfUpdateRestartRetryDelay.Milliseconds())
+			time.Sleep(selfUpdateRestartRetryDelay)
+		}
+	}
+	return fmt.Errorf("服务重启失败，重试 %d 次后仍失败: %w", selfUpdateRestartRetryTimes, lastErr)
 }
 
 func updateSelfUpdateResult(opts selfUpdateWorkerOptions, status, errMsg string, newSize int64) error {

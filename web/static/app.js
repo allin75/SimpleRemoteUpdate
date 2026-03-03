@@ -344,6 +344,7 @@
       backup_dir: cfg.backup_dir || "",
       deployments_file: cfg.deployments_file || "",
       log_file: cfg.log_file || "",
+      self_update_service_name: cfg.self_update_service_name || "",
     };
     Object.keys(map).forEach((k) => {
       const input = systemForm.elements.namedItem(k);
