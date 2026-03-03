@@ -140,6 +140,15 @@
     logPanel.scrollTop = logPanel.scrollHeight;
   }
 
+  function focusLogPanel() {
+    if (!logPanel) return;
+    try {
+      logPanel.scrollIntoView({ behavior: "smooth", block: "center" });
+    } catch (_err) {
+      logPanel.scrollIntoView();
+    }
+  }
+
   function setProgress(percent) {
     if (!progressBar || !progressLabel) return;
     const p = Math.max(0, Math.min(100, Math.floor(percent)));
@@ -396,7 +405,7 @@
     }
   }
 
-  function connectLogs(id) {
+  async function connectLogs(id) {
     if (!id) return;
     if (eventSource) {
       eventSource.close();
@@ -404,9 +413,38 @@
     }
     if (!logPanel) return;
     logPanel.innerHTML = "";
+    focusLogPanel();
     setText(logDeploymentId, `当前日志: ${id}`);
     setLogStageProgress("", -1);
-    appendLog(`[${new Date().toLocaleTimeString()}] 连接日志流...`);
+    appendLog(`[${new Date().toLocaleTimeString()}] 正在加载任务信息...`);
+
+    let dep = null;
+    try {
+      const res = await fetch(`/api/deployments/${id}`, { credentials: "same-origin" });
+      if (!res.ok) {
+        appendLog(`[${new Date().toLocaleTimeString()}] 任务信息读取失败 (${res.status})`, "error");
+        return;
+      }
+      dep = await res.json();
+      appendLog(
+        `[${new Date().toLocaleTimeString()}] 任务状态: ${dep.status || "-"} | 类型: ${dep.type || "-"} | 版本: ${dep.version || "-"}`,
+      );
+      if (dep.error) {
+        appendLog(`[${new Date().toLocaleTimeString()}] 错误: ${dep.error}`, "error");
+      }
+    } catch (_err) {
+      appendLog(`[${new Date().toLocaleTimeString()}] 任务信息读取失败`, "error");
+      return;
+    }
+
+    const status = `${dep?.status || ""}`.trim().toLowerCase();
+    const doneStatuses = new Set(["success", "failed", "canceled", "cancelled"]);
+    if (doneStatuses.has(status)) {
+      appendLog(`[${new Date().toLocaleTimeString()}] 任务已结束，当前显示为任务摘要（无实时增量日志）`, "warn");
+      return;
+    }
+
+    appendLog(`[${new Date().toLocaleTimeString()}] 连接实时日志流...`);
     eventSource = new EventSource(`/api/deployments/${id}/events`);
     eventSource.onmessage = (e) => {
       try {
