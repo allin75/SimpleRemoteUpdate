@@ -18,6 +18,7 @@
   const projectSelect = document.getElementById("project-select");
   const uploadReplaceMode = document.getElementById("upload-replace-mode");
   const targetVersionInput = document.getElementById("target-version-input");
+  const scheduledAtInput = document.getElementById("scheduled-at-input");
   const nextVersionLabel = document.getElementById("next-version-label");
 
   const projectSidebar = document.getElementById("project-sidebar");
@@ -29,6 +30,7 @@
 
   const systemForm = document.getElementById("system-form");
   const systemMessage = document.getElementById("system-message");
+  const systemTestEmailBtn = document.getElementById("system-test-email-btn");
   const defaultProjectSelect = document.getElementById("default-project-select");
   const openSystemConfigBtn = document.getElementById("open-system-config-btn");
   const systemConfigDialog = document.getElementById("system-config-dialog");
@@ -100,6 +102,18 @@
 
   function isValidVersion(version) {
     return /^\d+\.\d+\.\d+$/.test((version || "").trim());
+  }
+
+  function formatDateTimeLocalValue(date) {
+    const d = date instanceof Date ? date : new Date();
+    const pad = (n) => `${n}`.padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function refreshScheduleInputMin() {
+    if (!scheduledAtInput) return;
+    const minDate = new Date(Date.now() + 60 * 1000);
+    scheduledAtInput.min = formatDateTimeLocalValue(minDate);
   }
 
   function nextPatchVersion(version) {
@@ -344,6 +358,7 @@
       backup_dir: cfg.backup_dir || "",
       deployments_file: cfg.deployments_file || "",
       log_file: cfg.log_file || "",
+      notify_email: cfg.notify_email || "",
       self_update_service_name: cfg.self_update_service_name || "",
     };
     Object.keys(map).forEach((k) => {
@@ -352,6 +367,8 @@
     });
     const keyInput = systemForm.elements.namedItem("new_auth_key");
     if (keyInput) keyInput.value = "";
+    const notifyKeyInput = systemForm.elements.namedItem("notify_email_auth_code");
+    if (notifyKeyInput) notifyKeyInput.value = "";
   }
 
   function selectProject(projectID, options = {}) {
@@ -585,6 +602,7 @@
   window.refreshDeployments = refreshDeployments;
   window.updaterViewLogs = connectLogs;
   window.updaterShowChanges = showChangesDialog;
+  refreshScheduleInputMin();
 
   function buildUploadFormData() {
     if (!uploadForm) return { ok: false, error: "上传表单不存在" };
@@ -604,6 +622,16 @@
     const replaceMode = `${formData.get("replace_mode") || ""}`.trim().toLowerCase();
     if (replaceMode !== "full" && replaceMode !== "partial") {
       formData.set("replace_mode", "full");
+    }
+    const scheduledAt = `${formData.get("scheduled_at") || ""}`.trim();
+    if (scheduledAt) {
+      const planned = new Date(scheduledAt);
+      if (!Number.isFinite(planned.getTime())) {
+        return { ok: false, error: "计划执行时间格式错误" };
+      }
+      if (planned.getTime() <= Date.now() + 5000) {
+        return { ok: false, error: "计划执行时间必须晚于当前时间至少 5 秒" };
+      }
     }
     return { ok: true, selectedID, formData };
   }
@@ -633,12 +661,19 @@
           payload = JSON.parse(xhr.responseText);
         } catch (_err) {}
         setProgress(100);
-        uploadMessage.textContent = `上传完成，任务ID: ${payload.id || "-"}，程序: ${payload.project_name || payload.project_id || "-"}，目标版本: ${payload.version || "-"}`;
-        if (payload.id) connectLogs(payload.id);
+        const isScheduled = `${payload.status || ""}`.toLowerCase() === "scheduled";
+        if (isScheduled) {
+          uploadMessage.textContent =
+            payload.message || `任务已排队，任务ID: ${payload.id || "-"}，计划执行时间: ${payload.scheduled_at || "-"}`;
+        } else {
+          uploadMessage.textContent = `上传完成，任务ID: ${payload.id || "-"}，程序: ${payload.project_name || payload.project_id || "-"}，目标版本: ${payload.version || "-"}`;
+          if (payload.id) connectLogs(payload.id);
+        }
         refreshDeployments();
         loadConfig(selectedID, true);
         uploadForm.reset();
         if (projectSelect) projectSelect.value = selectedID;
+        refreshScheduleInputMin();
         return;
       }
       let msg = `上传失败 (${xhr.status})`;
@@ -852,6 +887,31 @@
         await loadConfig(activeProjectId, true);
       } catch (_e) {
         setSystemMessage("保存失败");
+      }
+    });
+  }
+
+  if (systemTestEmailBtn && systemForm) {
+    systemTestEmailBtn.addEventListener("click", async () => {
+      const formData = new FormData(systemForm);
+      setSystemMessage("正在发送测试邮件...");
+      systemTestEmailBtn.disabled = true;
+      try {
+        const res = await fetch("/api/notify/test", {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setSystemMessage(payload.error || `测试邮件发送失败 (${res.status})`);
+          return;
+        }
+        setSystemMessage(payload.message || "测试邮件发送成功");
+      } catch (_e) {
+        setSystemMessage("测试邮件发送失败");
+      } finally {
+        systemTestEmailBtn.disabled = false;
       }
     });
   }

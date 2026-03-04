@@ -44,6 +44,8 @@
   <td class="px-2 py-2"><span class="{{statusClass .Status}} font-medium">{{.Status}}</span></td>
   <td class="px-2 py-2 text-slate-600">
     <div>创建: {{fmtTime .CreatedAt}}</div>
+    {{if .ScheduledAt}}<div>计划: {{fmtMaybeTime .ScheduledAt}}</div>{{end}}
+    <div>开始: {{fmtTime .StartedAt}}</div>
     <div>完成: {{fmtMaybeTime .FinishedAt}}</div>
   </td>
   <td class="px-2 py-2">{{fmtMs .DurationMs}}</td>
@@ -64,6 +66,11 @@
   <td class="px-2 py-2">
     <div class="flex flex-col gap-2">
       <button onclick="window.updaterViewLogs('{{.ID}}')" class="text-xs px-1.5 py-0.5 rounded border border-slate-300 hover:bg-slate-100">查看日志</button>
+      {{if and (eq .Type "deploy") .ScheduledAt (or (eq .Status "scheduled") (eq .Status "queued"))}}
+      <form hx-post="/api/deployments/{{.ID}}/cancel" hx-confirm="确认取消该等待任务？" hx-target="#deployments-container" hx-swap="innerHTML">
+        <button class="text-xs px-1.5 py-0.5 rounded bg-rose-600 text-white hover:bg-rose-500">取消任务</button>
+      </form>
+      {{end}}
       {{if and (eq .Type "deploy") (eq .Status "success")}}
       <form hx-post="/api/deployments/{{.ID}}/rollback" hx-confirm="确认回滚到该版本？" hx-target="#deployments-container" hx-swap="innerHTML">
         <button class="text-xs px-1.5 py-0.5 rounded bg-amber-600 text-white hover:bg-amber-500">回滚</button>

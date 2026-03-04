@@ -128,6 +128,12 @@
             <span id="next-version-label" class="mt-1 block text-xs text-slate-500">默认下一版本: -</span>
           </label>
           <label class="block text-sm">
+            计划执行时间（可选，到点自动更新）
+            <input id="scheduled-at-input" type="datetime-local" name="scheduled_at"
+                   class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
+            <span class="mt-1 block text-xs text-slate-500">留空立即执行；已设置则进入等待队列，可在部署记录中取消。</span>
+          </label>
+          <label class="block text-sm">
             本次替换模式
             <select id="upload-replace-mode" name="replace_mode"
                     class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white">
@@ -295,6 +301,15 @@
         log_file
         <input name="log_file" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
       </label>
+      <label class="block text-sm">
+        notify_email（通知邮箱，默认按 QQ SMTP）
+        <input name="notify_email" placeholder="例如 123456@qq.com" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+      </label>
+      <label class="block text-sm">
+        notify_email_auth_code（邮箱授权码）
+        <input name="notify_email_auth_code" type="password" placeholder="留空不修改已保存授权码"
+               class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+      </label>
       <label class="block text-sm md:col-span-2 xl:col-span-3">
         self_update_service_name（可选，NSSM 服务名，用于自更新时停启服务）
         <input name="self_update_service_name" placeholder="例如 updater-service"
@@ -305,6 +320,7 @@
         <input name="new_auth_key" type="password" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
       </label>
       <div class="md:col-span-2 xl:col-span-3 flex items-center gap-3">
+        <button id="system-test-email-btn" type="button" class="px-4 py-2 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50">发送测试邮件</button>
         <button type="submit" class="px-4 py-2 rounded bg-sky-700 text-white hover:bg-sky-600">保存系统配置</button>
         <span id="system-message" class="text-sm text-slate-600"></span>
       </div>

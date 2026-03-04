@@ -17,6 +17,7 @@ const (
 
 func (a *App) runDeployment(id, projectID string) {
 	defer a.releaseProjectTask(projectID)
+	defer a.notifyDeploymentIfNeeded(id)
 	defer func() {
 		if rec := recover(); rec != nil {
 			a.logger.Error("deployment panic", "deployment_id", id, "panic", rec)
@@ -186,6 +187,7 @@ func (a *App) runDeployment(id, projectID string) {
 
 func (a *App) runRollback(id, sourceID, projectID string) {
 	defer a.releaseProjectTask(projectID)
+	defer a.notifyDeploymentIfNeeded(id)
 	defer func() {
 		if rec := recover(); rec != nil {
 			a.logger.Error("rollback panic", "deployment_id", id, "panic", rec)

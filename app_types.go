@@ -25,6 +25,8 @@ type Config struct {
 	DeploymentsFile       string           `json:"deployments_file"`
 	LogFile               string           `json:"log_file"`
 	SelfUpdateServiceName string           `json:"self_update_service_name"`
+	NotifyEmail           string           `json:"notify_email"`
+	NotifyEmailAuthCode   string           `json:"notify_email_auth_code"`
 	ServiceName           string           `json:"service_name"`
 	TargetDir             string           `json:"target_dir"`
 	ReplaceMode           string           `json:"replace_mode"`
@@ -65,6 +67,7 @@ type Deployment struct {
 	Note          string        `json:"note"`
 	LoginIP       string        `json:"login_ip"`
 	CreatedAt     time.Time     `json:"created_at"`
+	ScheduledAt   *time.Time    `json:"scheduled_at,omitempty"`
 	StartedAt     time.Time     `json:"started_at"`
 	FinishedAt    *time.Time    `json:"finished_at,omitempty"`
 	DurationMs    int64         `json:"duration_ms"`
@@ -107,4 +110,6 @@ type App struct {
 	taskMu      sync.Mutex
 	selfTask    bool
 	projectTask map[string]struct{}
+	schedMu     sync.Mutex
+	schedCancel map[string]func()
 }

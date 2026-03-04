@@ -26,6 +26,8 @@ func defaultConfig() Config {
 		DeploymentsFile:       "data/deployments.json",
 		LogFile:               "data/updater.log",
 		SelfUpdateServiceName: "",
+		NotifyEmail:           "",
+		NotifyEmailAuthCode:   "",
 		ServiceName:           "YourServiceName",
 		TargetDir:             "C:/YourApp",
 		ReplaceMode:           ReplaceModeFull,
@@ -115,8 +117,10 @@ func parseTemplates() (*template.Template, error) {
 				return "text-emerald-700"
 			case "failed":
 				return "text-rose-700"
-			case "deploying", "rollbacking", "queued", "self_updating", "switching":
+			case "deploying", "rollbacking", "queued", "scheduled", "self_updating", "switching":
 				return "text-amber-700"
+			case "canceled", "cancelled":
+				return "text-slate-500"
 			default:
 				return "text-slate-700"
 			}

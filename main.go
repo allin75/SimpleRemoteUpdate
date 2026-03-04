@@ -9,7 +9,10 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/mail"
+	"net/smtp"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -75,7 +78,9 @@ func main() {
 		events:      newEventHub(),
 		static:      http.FileServer(http.FS(staticFS)),
 		projectTask: make(map[string]struct{}),
+		schedCancel: make(map[string]func()),
 	}
+	app.resumeScheduledDeployments()
 
 	logger.Info("updater server started",
 		"addr", cfg.ListenAddr,
@@ -99,6 +104,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/api/preview", a.requireAuth(a.handlePreview))
 	mux.HandleFunc("/api/self-update", a.requireAuth(a.handleSelfUpdate))
 	mux.HandleFunc("/api/config", a.requireAuth(a.handleConfigAPI))
+	mux.HandleFunc("/api/notify/test", a.requireAuth(a.handleNotifyTestAPI))
 	mux.HandleFunc("/api/projects", a.requireAuth(a.handleProjectsAPI))
 	mux.HandleFunc("/api/projects/", a.requireAuth(a.handleProjectItemAPI))
 	mux.HandleFunc("/api/deployments/", a.requireAuth(a.handleDeploymentAPIs))
@@ -243,17 +249,6 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ok, reason := a.tryAcquireProjectTask(project.ID); !ok {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": reason})
-		return
-	}
-	locked := true
-	defer func() {
-		if locked {
-			a.releaseProjectTask(project.ID)
-		}
-	}()
-
 	id := newID("dep")
 	uploadPath := filepath.Join(cfg.UploadDir, id+".zip")
 	if err := saveMultipartFile(file, uploadPath); err != nil {
@@ -292,7 +287,37 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(r.FormValue("replace_mode")) == "" {
 		replaceMode = normalizeReplaceMode(project.DefaultReplaceMode)
 	}
+	scheduledAt, hasSchedule, err := parseScheduledAtFormValue(r.FormValue("scheduled_at"))
+	if err != nil {
+		_ = os.Remove(uploadPath)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	runNow := !hasSchedule
+	locked := false
+	if runNow {
+		if ok, reason := a.tryAcquireProjectTask(project.ID); !ok {
+			_ = os.Remove(uploadPath)
+			writeJSON(w, http.StatusConflict, map[string]any{"error": reason})
+			return
+		}
+		locked = true
+	}
+	defer func() {
+		if locked {
+			a.releaseProjectTask(project.ID)
+		}
+	}()
 
+	status := "queued"
+	startedAt := now
+	var scheduledAtPtr *time.Time
+	if hasSchedule {
+		status = "scheduled"
+		startedAt = time.Time{}
+		planned := scheduledAt
+		scheduledAtPtr = &planned
+	}
 	dep := Deployment{
 		ID:            id,
 		Type:          "deploy",
@@ -302,11 +327,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		ReplaceMode:   replaceMode,
 		BackupIgnore:  append([]string{}, project.BackupIgnore...),
 		ReplaceIgnore: append([]string{}, resolveReplaceIgnoreRulesForTarget(project.TargetDir, project.ReplaceIgnore, project.BackupIgnore)...),
-		Status:        "queued",
+		Status:        status,
 		Note:          strings.TrimSpace(r.FormValue("note")),
 		LoginIP:       clientIP(r),
 		CreatedAt:     now,
-		StartedAt:     now,
+		ScheduledAt:   scheduledAtPtr,
+		StartedAt:     startedAt,
 		UploadFile:    uploadPath,
 		ServiceName:   project.ServiceName,
 		TargetDir:     project.TargetDir,
@@ -321,14 +347,26 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go a.runDeployment(id, project.ID)
-	locked = false
+	if runNow {
+		go a.runDeployment(id, project.ID)
+		locked = false
+	} else {
+		a.scheduleDeploymentTask(id, project.ID, scheduledAt)
+	}
+	respStatus := "queued"
+	respMessage := ""
+	if hasSchedule {
+		respStatus = "scheduled"
+		respMessage = fmt.Sprintf("任务已加入等待队列，计划执行时间: %s", scheduledAt.Format("2006-01-02 15:04:05"))
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id":           id,
-		"status":       "queued",
+		"status":       respStatus,
 		"version":      targetVersion,
 		"project_id":   project.ID,
 		"project_name": project.Name,
+		"scheduled_at": scheduledAtPtr,
+		"message":      respMessage,
 	})
 }
 
@@ -579,6 +617,12 @@ func (a *App) handleDeploymentAPIs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleRollback(w, r, id)
+	case "cancel":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		a.handleCancelDeployment(w, r, id)
 	default:
 		http.NotFound(w, r)
 	}
@@ -695,6 +739,49 @@ func (a *App) handleRollback(w http.ResponseWriter, r *http.Request, sourceID st
 	a.handleDeploymentsPartial(w, r)
 }
 
+func (a *App) handleCancelDeployment(w http.ResponseWriter, r *http.Request, id string) {
+	dep, ok := a.store.Get(id)
+	if !ok {
+		http.Error(w, "deployment not found", http.StatusNotFound)
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(dep.Status))
+	if dep.Type != "deploy" || dep.ScheduledAt == nil || (status != "scheduled" && status != "queued") {
+		http.Error(w, "该任务当前不可取消", http.StatusBadRequest)
+		return
+	}
+
+	a.cancelScheduledDeploymentTask(id)
+	canceled := false
+	uploadFile := ""
+	now := time.Now()
+	if err := a.store.UpdateField(id, func(d *Deployment) {
+		s := strings.ToLower(strings.TrimSpace(d.Status))
+		if s != "scheduled" && s != "queued" {
+			return
+		}
+		canceled = true
+		d.Status = "canceled"
+		d.FinishedAt = &now
+		d.DurationMs = now.Sub(d.CreatedAt).Milliseconds()
+		d.Error = "任务已取消"
+		uploadFile = strings.TrimSpace(d.UploadFile)
+	}); err != nil {
+		http.Error(w, "取消任务失败", http.StatusInternalServerError)
+		return
+	}
+	if !canceled {
+		http.Error(w, "任务已开始执行，无法取消", http.StatusConflict)
+		return
+	}
+	if uploadFile != "" {
+		_ = os.Remove(uploadFile)
+	}
+	a.publish(id, "warn", "计划任务已取消")
+	a.notifyDeploymentIfNeeded(id)
+	a.handleDeploymentsPartial(w, r)
+}
+
 func (a *App) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		cfg := a.currentConfig()
@@ -721,6 +808,60 @@ func (a *App) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleNotifyTestAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := parseRequestForm(r); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求参数解析失败"})
+		return
+	}
+
+	cfg := a.currentConfig()
+	savedEmail := strings.TrimSpace(cfg.NotifyEmail)
+	email := strings.TrimSpace(r.FormValue("notify_email"))
+	if email == "" {
+		email = savedEmail
+	}
+
+	authCode := strings.TrimSpace(r.FormValue("notify_email_auth_code"))
+	if authCode == "" && strings.EqualFold(email, savedEmail) {
+		authCode = strings.TrimSpace(cfg.NotifyEmailAuthCode)
+	}
+
+	if email == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先填写 notify_email"})
+		return
+	}
+	if authCode == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先填写 notify_email_auth_code"})
+		return
+	}
+	if _, err := mail.ParseAddress(email); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("notify_email 格式错误: %v", err)})
+		return
+	}
+
+	nowText := time.Now().Format("2006-01-02 15:04:05")
+	subject := fmt.Sprintf("[SimpleRemoteUpdate] 邮件通知测试 %s", nowText)
+	body := strings.Join([]string{
+		"这是一封测试邮件，用于验证更新通知邮箱配置是否可用。",
+		fmt.Sprintf("发送时间: %s", nowText),
+		"",
+		"若你收到此邮件，说明 notify_email 与 notify_email_auth_code 配置有效。",
+	}, "\n")
+	if err := sendNotifyEmail(email, authCode, subject, body); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("发送测试邮件失败: %v", err)})
+		return
+	}
+	a.logger.Info("测试邮件已发送", "to", email)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": fmt.Sprintf("测试邮件已发送到 %s，请检查收件箱/垃圾箱", email),
+	})
+}
+
 func (a *App) handleSaveSystemConfig(w http.ResponseWriter, r *http.Request) {
 	oldCfg := a.currentConfig()
 	newCfg := oldCfg
@@ -732,6 +873,12 @@ func (a *App) handleSaveSystemConfig(w http.ResponseWriter, r *http.Request) {
 	newCfg.BackupDir = strings.TrimSpace(r.FormValue("backup_dir"))
 	newCfg.DeploymentsFile = strings.TrimSpace(r.FormValue("deployments_file"))
 	newCfg.LogFile = strings.TrimSpace(r.FormValue("log_file"))
+	newCfg.NotifyEmail = strings.TrimSpace(r.FormValue("notify_email"))
+	if _, ok := r.Form["notify_email_auth_code"]; ok {
+		if authCode := strings.TrimSpace(r.FormValue("notify_email_auth_code")); authCode != "" {
+			newCfg.NotifyEmailAuthCode = authCode
+		}
+	}
 	if _, ok := r.Form["self_update_service_name"]; ok {
 		newCfg.SelfUpdateServiceName = strings.TrimSpace(r.FormValue("self_update_service_name"))
 	}
@@ -996,25 +1143,27 @@ func configSnapshot(cfg Config) map[string]any {
 	projectsJSON, _ := json.MarshalIndent(cfg.Projects, "", "  ")
 	dp := getDefaultProject(cfg)
 	return map[string]any{
-		"listen_addr":              cfg.ListenAddr,
-		"session_cookie":           cfg.SessionCookie,
-		"default_project_id":       cfg.DefaultProjectID,
-		"projects_json":            string(projectsJSON),
-		"projects":                 cfg.Projects,
-		"current_version":          dp.CurrentVersion,
-		"upload_dir":               cfg.UploadDir,
-		"work_dir":                 cfg.WorkDir,
-		"backup_dir":               cfg.BackupDir,
-		"deployments_file":         cfg.DeploymentsFile,
-		"log_file":                 cfg.LogFile,
-		"self_update_service_name": cfg.SelfUpdateServiceName,
-		"service_name":             dp.ServiceName,
-		"target_dir":               dp.TargetDir,
-		"replace_mode":             dp.DefaultReplaceMode,
-		"default_replace_mode":     dp.DefaultReplaceMode,
-		"backup_ignore_text":       strings.Join(dp.BackupIgnore, "\n"),
-		"replace_ignore_text":      strings.Join(dp.ReplaceIgnore, "\n"),
-		"max_upload_mb":            dp.MaxUploadMB,
+		"listen_addr":                cfg.ListenAddr,
+		"session_cookie":             cfg.SessionCookie,
+		"default_project_id":         cfg.DefaultProjectID,
+		"projects_json":              string(projectsJSON),
+		"projects":                   cfg.Projects,
+		"current_version":            dp.CurrentVersion,
+		"upload_dir":                 cfg.UploadDir,
+		"work_dir":                   cfg.WorkDir,
+		"backup_dir":                 cfg.BackupDir,
+		"deployments_file":           cfg.DeploymentsFile,
+		"log_file":                   cfg.LogFile,
+		"notify_email":               cfg.NotifyEmail,
+		"notify_email_auth_code_set": strings.TrimSpace(cfg.NotifyEmailAuthCode) != "",
+		"self_update_service_name":   cfg.SelfUpdateServiceName,
+		"service_name":               dp.ServiceName,
+		"target_dir":                 dp.TargetDir,
+		"replace_mode":               dp.DefaultReplaceMode,
+		"default_replace_mode":       dp.DefaultReplaceMode,
+		"backup_ignore_text":         strings.Join(dp.BackupIgnore, "\n"),
+		"replace_ignore_text":        strings.Join(dp.ReplaceIgnore, "\n"),
+		"max_upload_mb":              dp.MaxUploadMB,
 	}
 }
 
@@ -1086,6 +1235,106 @@ func (a *App) applyConfigChanges(w http.ResponseWriter, r *http.Request, oldCfg,
 	return restartFields, nil
 }
 
+func (a *App) notifyDeploymentIfNeeded(depID string) {
+	dep, ok := a.store.Get(depID)
+	if !ok {
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(dep.Status))
+	if status != "success" && status != "failed" && status != "canceled" && status != "cancelled" {
+		return
+	}
+	if dep.Type != "deploy" && dep.Type != "rollback" {
+		return
+	}
+
+	cfg := a.currentConfig()
+	email := strings.TrimSpace(cfg.NotifyEmail)
+	authCode := strings.TrimSpace(cfg.NotifyEmailAuthCode)
+	if email == "" || authCode == "" {
+		return
+	}
+
+	projectName := strings.TrimSpace(dep.ProjectName)
+	if projectName == "" {
+		projectName = strings.TrimSpace(dep.ProjectID)
+	}
+	if projectName == "" {
+		projectName = "-"
+	}
+	subject := fmt.Sprintf("[SimpleRemoteUpdate] %s %s %s", dep.Type, status, dep.ID)
+	body := fmt.Sprintf(
+		"任务ID: %s\n类型: %s\n程序: %s\n版本: %s\n状态: %s\n创建时间: %s\n完成时间: %s\n耗时: %d ms\n说明: %s\n错误: %s\n",
+		dep.ID,
+		dep.Type,
+		projectName,
+		firstNonEmpty(dep.Version, "-"),
+		dep.Status,
+		dep.CreatedAt.Format("2006-01-02 15:04:05"),
+		formatTimePtr(dep.FinishedAt),
+		dep.DurationMs,
+		firstNonEmpty(dep.Note, "-"),
+		firstNonEmpty(dep.Error, "-"),
+	)
+	if err := sendNotifyEmail(email, authCode, subject, body); err != nil {
+		a.logger.Warn("更新结果邮件发送失败", "deployment_id", depID, "error", err.Error())
+		return
+	}
+	a.logger.Info("更新结果邮件已发送", "deployment_id", depID, "to", email)
+}
+
+func sendNotifyEmail(email, authCode, subject, body string) error {
+	email = strings.TrimSpace(email)
+	authCode = strings.TrimSpace(authCode)
+	if email == "" || authCode == "" {
+		return errors.New("notify email config is empty")
+	}
+	host, port, err := resolveSMTPServer(email)
+	if err != nil {
+		return err
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	auth := smtp.PlainAuth("", email, authCode, host)
+	fromDisplay := fmt.Sprintf("SimpleRemoteUpdate <%s>", email)
+	msg := strings.Join([]string{
+		fmt.Sprintf("From: %s", fromDisplay),
+		fmt.Sprintf("To: %s", email),
+		fmt.Sprintf("Subject: %s", subject),
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"",
+		body,
+	}, "\r\n")
+	return smtp.SendMail(addr, auth, email, []string{email}, []byte(msg))
+}
+
+func resolveSMTPServer(email string) (string, int, error) {
+	at := strings.LastIndex(email, "@")
+	if at <= 0 || at == len(email)-1 {
+		return "", 0, errors.New("notify_email 格式错误")
+	}
+	domain := strings.ToLower(strings.TrimSpace(email[at+1:]))
+	switch domain {
+	case "qq.com":
+		return "smtp.qq.com", 587, nil
+	case "163.com":
+		return "smtp.163.com", 587, nil
+	case "126.com":
+		return "smtp.126.com", 587, nil
+	case "gmail.com":
+		return "smtp.gmail.com", 587, nil
+	default:
+		return "smtp." + domain, 587, nil
+	}
+}
+
+func formatTimePtr(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "-"
+	}
+	return t.Format("2006-01-02 15:04:05")
+}
+
 func parsePositiveInt64(raw, field string) (int64, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -1113,6 +1362,142 @@ func nextProjectID(projects []ManagedProject) string {
 		if _, exists := findProjectByID(projects, candidate); !exists {
 			return candidate
 		}
+	}
+}
+
+const scheduledTaskRetryInterval = 5 * time.Second
+
+func parseScheduledAtFormValue(raw string) (time.Time, bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}, false, nil
+	}
+	layouts := []string{
+		"2006-01-02T15:04",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02 15:04:05",
+	}
+	var (
+		parsed time.Time
+		err    error
+	)
+	for _, layout := range layouts {
+		parsed, err = time.ParseInLocation(layout, trimmed, time.Local)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return time.Time{}, false, errors.New("计划执行时间格式错误，示例: 2026-03-05T10:30")
+	}
+	if !parsed.After(time.Now().Add(5 * time.Second)) {
+		return time.Time{}, false, errors.New("计划执行时间必须晚于当前时间至少 5 秒")
+	}
+	return parsed, true, nil
+}
+
+func (a *App) scheduleDeploymentTask(depID, projectID string, runAt time.Time) {
+	ctx, cancel := context.WithCancel(context.Background())
+	a.schedMu.Lock()
+	if old := a.schedCancel[depID]; old != nil {
+		old()
+	}
+	a.schedCancel[depID] = cancel
+	a.schedMu.Unlock()
+
+	go a.runScheduledDeployment(ctx, depID, projectID, runAt)
+}
+
+func (a *App) cancelScheduledDeploymentTask(depID string) {
+	a.schedMu.Lock()
+	cancel := a.schedCancel[depID]
+	delete(a.schedCancel, depID)
+	a.schedMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *App) clearScheduledDeploymentTask(depID string) {
+	a.schedMu.Lock()
+	delete(a.schedCancel, depID)
+	a.schedMu.Unlock()
+}
+
+func (a *App) runScheduledDeployment(ctx context.Context, depID, projectID string, runAt time.Time) {
+	defer a.clearScheduledDeploymentTask(depID)
+
+	delay := time.Until(runAt)
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+	}
+
+	a.publish(depID, "info", "计划时间到达，进入执行队列")
+	_ = a.store.UpdateField(depID, func(dep *Deployment) {
+		if strings.EqualFold(dep.Status, "scheduled") {
+			dep.Status = "queued"
+			dep.Error = ""
+		}
+	})
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		dep, ok := a.store.Get(depID)
+		if !ok {
+			return
+		}
+		status := strings.ToLower(strings.TrimSpace(dep.Status))
+		if status == "canceled" || status == "cancelled" || status == "success" || status == "failed" {
+			return
+		}
+		if status != "queued" && status != "scheduled" {
+			return
+		}
+
+		actualProjectID := strings.TrimSpace(projectID)
+		if actualProjectID == "" {
+			actualProjectID = strings.TrimSpace(dep.ProjectID)
+		}
+		if ok, _ := a.tryAcquireProjectTask(actualProjectID); ok {
+			latest, exists := a.store.Get(depID)
+			if !exists || strings.EqualFold(latest.Status, "canceled") || strings.EqualFold(latest.Status, "cancelled") {
+				a.releaseProjectTask(actualProjectID)
+				return
+			}
+			a.publish(depID, "info", "计划任务开始执行")
+			go a.runDeployment(depID, actualProjectID)
+			return
+		}
+		time.Sleep(scheduledTaskRetryInterval)
+	}
+}
+
+func (a *App) resumeScheduledDeployments() {
+	for _, dep := range a.store.List() {
+		if dep.Type != "deploy" || dep.ScheduledAt == nil {
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(dep.Status))
+		if status != "scheduled" && status != "queued" {
+			continue
+		}
+		runAt := *dep.ScheduledAt
+		if status == "queued" || runAt.Before(time.Now()) {
+			runAt = time.Now().Add(1 * time.Second)
+		}
+		a.scheduleDeploymentTask(dep.ID, dep.ProjectID, runAt)
 	}
 }
 
@@ -1270,6 +1655,14 @@ func validateRuntimeConfig(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.LogFile) == "" {
 		return errors.New("log_file 不能为空")
+	}
+	if email := strings.TrimSpace(cfg.NotifyEmail); email != "" {
+		if _, err := mail.ParseAddress(email); err != nil {
+			return fmt.Errorf("notify_email 格式错误: %v", err)
+		}
+	}
+	if strings.TrimSpace(cfg.NotifyEmailAuthCode) != "" && strings.TrimSpace(cfg.NotifyEmail) == "" {
+		return errors.New("配置了 notify_email_auth_code 时，notify_email 不能为空")
 	}
 	if cfg.MaxUploadMB <= 0 {
 		return errors.New("max_upload_mb 必须大于 0")
