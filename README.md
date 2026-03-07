@@ -6,6 +6,7 @@
 
 - 多程序独立配置（互不干扰）：`service_name`、`target_dir`、`current_version`、忽略规则等按程序保存。
 - 更新流程：上传 ZIP -> 备份 -> 停服务（可选）-> 替换文件 -> 启服务（可选）-> 记录部署结果。
+- 首次部署支持：当目标目录为空或不存在时，可按程序开启 `allow_initial_deploy`，首次部署会跳过备份，并可在部署完成后自动创建原生 Windows 服务或通过 NSSM 包装普通程序为服务。
 - 更新模式可选：
   - `full`（全部替换）：删除目标目录中“上传包不存在”的文件，适合完整发版。
   - `partial`（局部替换）：仅覆盖上传包内文件，不删除目标目录其他文件，适合增量发版。
@@ -57,8 +58,19 @@ echo -n "你的密钥" | openssl dgst -sha256
 ## 配置说明（核心）
 
 - 系统级：`listen_addr`、`session_cookie`、`auth_key_sha256`、`upload_dir`、`work_dir`、`backup_dir`、`deployments_file`、`log_file`。
-- 程序级（`projects[]`）：`id`、`name`、`service_name`、`target_dir`、`current_version`、`max_upload_mb`、`default_replace_mode`、`backup_ignore`、`replace_ignore`。
+- 程序级（`projects[]`）：`id`、`name`、`service_name`、`target_dir`、`current_version`、`max_upload_mb`、`default_replace_mode`、`allow_initial_deploy`、`service_install_mode`、`service_exe_path`、`service_args`、`service_display_name`、`service_description`、`service_start_type`、`backup_ignore`、`replace_ignore`。
+- 系统级补充：`nssm_exe_path`（可选，指定 `nssm.exe` 路径；支持相对路径。相对路径按服务程序所在目录解析；留空则优先尝试程序目录下的 `nssm.exe`，再尝试从 PATH 查找）。
 - `service_name` 可为空：为空时部署/回滚将跳过服务启停，仅进行文件替换。
+
+### 首次部署与服务安装
+
+- `allow_initial_deploy=true`：允许目标目录为空或不存在时直接部署；默认关闭。
+- 首次部署会自动跳过备份，因此该次部署记录不能直接回滚到“部署前空目录”。
+- `service_install_mode=windows_service`：仅在服务当前不存在时，部署完成后自动创建原生 Windows 服务；要求目标 EXE 自身实现 Windows 服务协议。
+- `service_install_mode=nssm`：仅在服务当前不存在时，部署完成后通过 NSSM 创建 Windows 服务；适合普通 Web/控制台程序。
+- `service_exe_path`：服务启动文件，通常填写压缩包解压后的 exe 文件名或相对 `target_dir` 的路径（例如 `MyApp.exe`、`bin/MyApp.exe`）；仅在极少数场景下才需要绝对路径。启用服务安装时必填。
+- `service_args`：服务启动参数数组；页面上按“每行一个”编辑。
+- `service_start_type`：支持 `automatic`、`manual`、`disabled`。
 
 ### 部署时替换策略
 

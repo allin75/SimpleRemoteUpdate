@@ -60,6 +60,7 @@ This project is a Go-based Windows remote updater with embedded web UI.
 - Validate ignore rules carefully; wrong patterns may skip required files during deploy/rollback.
 - Any new `config.json` field must have a backward-compatible default value in code.
 - Any `projects[]` schema change must update both `README.md` and this guide in the same PR.
+- Current `projects[]` deployment-related extensions include `allow_initial_deploy`, `service_install_mode`, `service_exe_path`, `service_args`, `service_display_name`, `service_description`, and `service_start_type`; keep docs and UI/API payloads aligned when changing them. System-level service wrapper extension `nssm_exe_path` must also stay aligned across docs and UI/API payloads when changed.
 
 ## Runtime Artifacts
 - Never commit runtime/generated files unless explicitly requested:

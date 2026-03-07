@@ -412,33 +412,41 @@ func previewDirectoryChanges(src, target string, ignore *IgnoreMatcher, removeMi
 
 	changes := make([]ChangedFile, 0)
 	if removeMissing {
-		err = filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
+		if _, err := os.Stat(target); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				err = nil
+			} else {
+				return nil, nil, err
 			}
-			if path == target {
-				return nil
-			}
-			rel, err := filepath.Rel(target, path)
-			if err != nil {
-				return err
-			}
-			rel = normalizeRelPath(rel)
-			if ignore.ShouldIgnore(rel, d.IsDir()) {
-				addIgnored(rel)
+		} else {
+			err = filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if path == target {
+					return nil
+				}
+				rel, err := filepath.Rel(target, path)
+				if err != nil {
+					return err
+				}
+				rel = normalizeRelPath(rel)
+				if ignore.ShouldIgnore(rel, d.IsDir()) {
+					addIgnored(rel)
+					if d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				if d.IsDir() {
-					return filepath.SkipDir
+					return nil
+				}
+				if _, ok := sourceFiles[rel]; !ok {
+					changes = append(changes, ChangedFile{Path: rel, Action: "deleted", Size: 0})
 				}
 				return nil
-			}
-			if d.IsDir() {
-				return nil
-			}
-			if _, ok := sourceFiles[rel]; !ok {
-				changes = append(changes, ChangedFile{Path: rel, Action: "deleted", Size: 0})
-			}
-			return nil
-		})
+			})
+		}
 		if err != nil {
 			return nil, nil, err
 		}
@@ -529,36 +537,44 @@ func previewZipChanges(zipPath, target string, ignore *IgnoreMatcher, removeMiss
 
 	changes := make([]ChangedFile, 0)
 	if removeMissing {
-		err = filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
+		if _, err := os.Stat(target); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				err = nil
+			} else {
+				return nil, nil, err
 			}
-			if path == target {
-				return nil
-			}
-			rel, err := filepath.Rel(target, path)
-			if err != nil {
-				return err
-			}
-			rel = normalizeRelPath(rel)
-			if ignore.ShouldIgnore(rel, d.IsDir()) {
-				addIgnored(rel)
+		} else {
+			err = filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if path == target {
+					return nil
+				}
+				rel, err := filepath.Rel(target, path)
+				if err != nil {
+					return err
+				}
+				rel = normalizeRelPath(rel)
+				if ignore.ShouldIgnore(rel, d.IsDir()) {
+					addIgnored(rel)
+					if d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				if d.IsDir() {
-					return filepath.SkipDir
+					if _, ok := sourceDirs[rel]; !ok {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if _, ok := sourceFiles[rel]; !ok {
+					changes = append(changes, ChangedFile{Path: rel, Action: "deleted", Size: 0})
 				}
 				return nil
-			}
-			if d.IsDir() {
-				if _, ok := sourceDirs[rel]; !ok {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if _, ok := sourceFiles[rel]; !ok {
-				changes = append(changes, ChangedFile{Path: rel, Action: "deleted", Size: 0})
-			}
-			return nil
-		})
+			})
+		}
 		if err != nil {
 			return nil, nil, err
 		}

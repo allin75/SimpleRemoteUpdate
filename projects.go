@@ -14,6 +14,13 @@ func normalizeProjects(cfg *Config) {
 			TargetDir:          strings.TrimSpace(cfg.TargetDir),
 			CurrentVersion:     firstNonEmpty(strings.TrimSpace(cfg.CurrentVersion), "0.0.1"),
 			DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
+			AllowInitialDeploy: false,
+			ServiceInstallMode: normalizeServiceInstallMode(""),
+			ServiceExePath:     "",
+			ServiceArgs:        nil,
+			ServiceDisplayName: "",
+			ServiceDescription: "",
+			ServiceStartType:   normalizeServiceStartType(""),
 			BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
 			ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
 			MaxUploadMB:        cfg.MaxUploadMB,
@@ -41,6 +48,12 @@ func normalizeProjects(cfg *Config) {
 			mode = cfg.ReplaceMode
 		}
 		p.DefaultReplaceMode = normalizeReplaceMode(mode)
+		p.ServiceInstallMode = normalizeServiceInstallMode(p.ServiceInstallMode)
+		p.ServiceExePath = strings.TrimSpace(p.ServiceExePath)
+		p.ServiceArgs = normalizeServiceArgs(p.ServiceArgs)
+		p.ServiceDisplayName = strings.TrimSpace(p.ServiceDisplayName)
+		p.ServiceDescription = strings.TrimSpace(p.ServiceDescription)
+		p.ServiceStartType = normalizeServiceStartType(p.ServiceStartType)
 		if p.MaxUploadMB <= 0 {
 			p.MaxUploadMB = cfg.MaxUploadMB
 		}
@@ -63,6 +76,13 @@ func normalizeProjects(cfg *Config) {
 			TargetDir:          strings.TrimSpace(cfg.TargetDir),
 			CurrentVersion:     "0.0.1",
 			DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
+			AllowInitialDeploy: false,
+			ServiceInstallMode: normalizeServiceInstallMode(""),
+			ServiceExePath:     "",
+			ServiceArgs:        nil,
+			ServiceDisplayName: "",
+			ServiceDescription: "",
+			ServiceStartType:   normalizeServiceStartType(""),
 			BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
 			ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
 			MaxUploadMB:        firstInt64(cfg.MaxUploadMB, 1024),
@@ -110,6 +130,13 @@ func getDefaultProject(cfg Config) ManagedProject {
 		TargetDir:          cfg.TargetDir,
 		CurrentVersion:     firstNonEmpty(cfg.CurrentVersion, "0.0.1"),
 		DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
+		AllowInitialDeploy: false,
+		ServiceInstallMode: normalizeServiceInstallMode(""),
+		ServiceExePath:     "",
+		ServiceArgs:        nil,
+		ServiceDisplayName: "",
+		ServiceDescription: "",
+		ServiceStartType:   normalizeServiceStartType(""),
 		BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
 		ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
 		MaxUploadMB:        firstInt64(cfg.MaxUploadMB, 1024),
@@ -123,6 +150,52 @@ func normalizeReplaceMode(mode string) string {
 	default:
 		return ReplaceModeFull
 	}
+}
+
+func normalizeDeployEntry(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case DeployEntryInitial:
+		return DeployEntryInitial
+	default:
+		return DeployEntryStandard
+	}
+}
+
+func normalizeServiceInstallMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ServiceInstallModeWindows:
+		return ServiceInstallModeWindows
+	case ServiceInstallModeNSSM:
+		return ServiceInstallModeNSSM
+	default:
+		return ServiceInstallModeNone
+	}
+}
+
+func normalizeServiceStartType(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case ServiceStartTypeManual:
+		return ServiceStartTypeManual
+	case ServiceStartTypeDisabled:
+		return ServiceStartTypeDisabled
+	default:
+		return ServiceStartTypeAutomatic
+	}
+}
+
+func normalizeServiceArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			continue
+		}
+		out = append(out, arg)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func firstNonEmpty(v string, fallback string) string {

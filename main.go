@@ -98,6 +98,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/login", a.handleLogin)
 	mux.HandleFunc("/logout", a.requireAuth(a.handleLogout))
 	mux.HandleFunc("/", a.requireAuth(a.handleIndex))
+	mux.HandleFunc("/initial-deploy", a.requireAuth(a.handleInitialDeployPage))
 	mux.HandleFunc("/partials/deployments", a.requireAuth(a.handleDeploymentsPartial))
 	mux.HandleFunc("/partials/deployments/rows", a.requireAuth(a.handleDeploymentsRows))
 	mux.HandleFunc("/api/upload", a.requireAuth(a.handleUpload))
@@ -176,13 +177,35 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	a.renderConsolePage(w, false)
+	return
+}
+
+func (a *App) handleInitialDeployPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	a.renderConsolePage(w, true)
+}
+
+func (a *App) renderConsolePage(w http.ResponseWriter, initialDeployPage bool) {
 	cfg := a.currentConfig()
 	project := getDefaultProject(cfg)
 	_ = a.templates.ExecuteTemplate(w, "index.html", map[string]any{
-		"ServiceName":    project.ServiceName,
-		"TargetDir":      project.TargetDir,
-		"MaxUploadMB":    project.MaxUploadMB,
-		"CurrentVersion": project.CurrentVersion,
+		"ServiceName":       project.ServiceName,
+		"TargetDir":         project.TargetDir,
+		"MaxUploadMB":       project.MaxUploadMB,
+		"CurrentVersion":    project.CurrentVersion,
+		"InitialDeployPage": initialDeployPage,
+		"PageTitle": func() string {
+			if initialDeployPage {
+				return "首次部署专页"
+			}
+			return "常规部署"
+		}(),
+		"StandardDeployPath": "/",
+		"InitialDeployPath":  "/initial-deploy",
 	})
 }
 
@@ -228,6 +251,23 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	project, found := findProjectByID(cfg.Projects, projectID)
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("未找到程序: %s", projectID)})
+		return
+	}
+	deployEntry := normalizeDeployEntry(r.FormValue("deploy_entry"))
+	clearTargetBeforeDeploy := parseBoolFormValue(r.FormValue("clear_target_before_deploy"))
+	targetExists, targetEmpty, targetCheckErr := inspectTargetDirState(project.TargetDir)
+	if targetCheckErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("检查目标目录失败: %v", targetCheckErr)})
+		return
+	}
+	targetHasExistingFiles := targetExists && !targetEmpty
+	initialDeploy := isRuntimeInitialDeploy(targetExists, targetEmpty, deployEntry == DeployEntryInitial && clearTargetBeforeDeploy)
+	if initialDeploy && deployEntry != DeployEntryInitial {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "检测到目标目录为空或不存在，请前往“首次部署专页”完成首次部署，常规部署页已禁止继续以降低误操作"})
+		return
+	}
+	if targetHasExistingFiles && deployEntry == DeployEntryInitial && !clearTargetBeforeDeploy {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "首次部署专页检测到目标目录已有内容。请先确认“清空现有文件后再部署”，再继续首次部署。"})
 		return
 	}
 
@@ -319,23 +359,35 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		scheduledAtPtr = &planned
 	}
 	dep := Deployment{
-		ID:            id,
-		Type:          "deploy",
-		Version:       targetVersion,
-		ProjectID:     project.ID,
-		ProjectName:   project.Name,
-		ReplaceMode:   replaceMode,
-		BackupIgnore:  append([]string{}, project.BackupIgnore...),
-		ReplaceIgnore: append([]string{}, resolveReplaceIgnoreRulesForTarget(project.TargetDir, project.ReplaceIgnore, project.BackupIgnore)...),
-		Status:        status,
-		Note:          strings.TrimSpace(r.FormValue("note")),
-		LoginIP:       clientIP(r),
-		CreatedAt:     now,
-		ScheduledAt:   scheduledAtPtr,
-		StartedAt:     startedAt,
-		UploadFile:    uploadPath,
-		ServiceName:   project.ServiceName,
-		TargetDir:     project.TargetDir,
+		ID:                      id,
+		Type:                    "deploy",
+		Version:                 targetVersion,
+		ProjectID:               project.ID,
+		ProjectName:             project.Name,
+		InitialDeploy:           initialDeploy,
+		BackupSkipped:           initialDeploy,
+		ReplaceMode:             replaceMode,
+		BackupIgnore:            append([]string{}, project.BackupIgnore...),
+		ReplaceIgnore:           append([]string{}, resolveReplaceIgnoreRulesForTarget(project.TargetDir, project.ReplaceIgnore, project.BackupIgnore)...),
+		Status:                  status,
+		Note:                    strings.TrimSpace(r.FormValue("note")),
+		LoginIP:                 clientIP(r),
+		CreatedAt:               now,
+		ScheduledAt:             scheduledAtPtr,
+		StartedAt:               startedAt,
+		UploadFile:              uploadPath,
+		ServiceName:             project.ServiceName,
+		TargetDir:               project.TargetDir,
+		ServiceInstallMode:      project.ServiceInstallMode,
+		ServiceExePath:          project.ServiceExePath,
+		ServiceArgs:             append([]string{}, project.ServiceArgs...),
+		ServiceDisplayName:      project.ServiceDisplayName,
+		ServiceDescription:      project.ServiceDescription,
+		ServiceStartType:        project.ServiceStartType,
+		ClearTargetBeforeDeploy: clearTargetBeforeDeploy,
+	}
+	if initialDeploy {
+		dep.ReplaceIgnore = nil
 	}
 	if dep.Note == "" {
 		dep.Note = "(未填写更新说明)"
@@ -360,13 +412,14 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respMessage = fmt.Sprintf("任务已加入等待队列，计划执行时间: %s", scheduledAt.Format("2006-01-02 15:04:05"))
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"id":           id,
-		"status":       respStatus,
-		"version":      targetVersion,
-		"project_id":   project.ID,
-		"project_name": project.Name,
-		"scheduled_at": scheduledAtPtr,
-		"message":      respMessage,
+		"id":                   id,
+		"status":               respStatus,
+		"version":              targetVersion,
+		"project_id":           project.ID,
+		"project_name":         project.Name,
+		"service_install_mode": project.ServiceInstallMode,
+		"scheduled_at":         scheduledAtPtr,
+		"message":              respMessage,
 	})
 }
 
@@ -395,6 +448,7 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("未找到程序: %s", projectID)})
 		return
 	}
+	deployEntry := normalizeDeployEntry(r.FormValue("deploy_entry"))
 
 	file, header, err := r.FormFile("package")
 	if err != nil {
@@ -419,6 +473,17 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 		replaceMode = normalizeReplaceMode(project.DefaultReplaceMode)
 	}
 	removeMissing := replaceMode == ReplaceModeFull
+	targetExists, targetEmpty, targetCheckErr := inspectTargetDirState(project.TargetDir)
+	if targetCheckErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("检查目标目录失败: %v", targetCheckErr)})
+		return
+	}
+	targetHasExistingFiles := targetExists && !targetEmpty
+	initialDeploy := isPreviewInitialDeploy(targetExists, targetEmpty, deployEntry)
+	initialDeployAllowed := !initialDeploy || project.AllowInitialDeploy
+	requiresInitialClearConfirm := deployEntry == DeployEntryInitial && targetHasExistingFiles
+	requiresInitialPage := initialDeploy && deployEntry != DeployEntryInitial
+	requiresStandardPage := false
 
 	previewID := newID("preview")
 	workDir := filepath.Join(cfg.WorkDir, previewID)
@@ -435,6 +500,9 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	replaceRules := resolveReplaceIgnoreRulesForTarget(project.TargetDir, project.ReplaceIgnore, project.BackupIgnore)
+	if initialDeploy {
+		replaceRules = nil
+	}
 	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
 	changed, ignoredPaths, err := previewZipChanges(uploadPath, project.TargetDir, replaceIgnore, removeMissing)
 	if err != nil {
@@ -456,14 +524,25 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
-		"type":           "preview",
-		"project_id":     project.ID,
-		"project_name":   project.Name,
-		"replace_mode":   replaceMode,
-		"changed":        changed,
-		"replace_ignore": replaceRules,
-		"ignored_paths":  ignoredPaths,
+		"ok":                             true,
+		"type":                           "preview",
+		"project_id":                     project.ID,
+		"project_name":                   project.Name,
+		"replace_mode":                   replaceMode,
+		"deploy_entry":                   deployEntry,
+		"initial_deploy":                 initialDeploy,
+		"initial_deploy_allowed":         initialDeployAllowed,
+		"requires_initial_clear_confirm": requiresInitialClearConfirm,
+		"requires_initial_page":          requiresInitialPage,
+		"requires_standard_page":         requiresStandardPage,
+		"allow_initial_deploy":           project.AllowInitialDeploy,
+		"backup_skipped":                 initialDeploy,
+		"service_install_mode":           project.ServiceInstallMode,
+		"service_name":                   project.ServiceName,
+		"service_exe_path":               project.ServiceExePath,
+		"changed":                        changed,
+		"replace_ignore":                 replaceRules,
+		"ignored_paths":                  ignoredPaths,
 		"summary": map[string]any{
 			"total":         len(changed),
 			"added":         added,
@@ -690,6 +769,10 @@ func (a *App) handleRollback(w http.ResponseWriter, r *http.Request, sourceID st
 		return
 	}
 	if source.BackupFile == "" {
+		if source.InitialDeploy || source.BackupSkipped {
+			http.Error(w, "该部署属于首次部署且未生成备份，当前版本不支持自动回滚到部署前空目录", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "该部署记录没有备份文件，无法回滚", http.StatusBadRequest)
 		return
 	}
@@ -712,23 +795,31 @@ func (a *App) handleRollback(w http.ResponseWriter, r *http.Request, sourceID st
 	now := time.Now()
 	id := newID("rb")
 	rollback := Deployment{
-		ID:            id,
-		Type:          "rollback",
-		RollbackOf:    sourceID,
-		Version:       source.Version,
-		ProjectID:     projectID,
-		ProjectName:   source.ProjectName,
-		ReplaceMode:   source.ReplaceMode,
-		BackupIgnore:  append([]string{}, source.BackupIgnore...),
-		ReplaceIgnore: append([]string{}, source.ReplaceIgnore...),
-		Status:        "queued",
-		Note:          fmt.Sprintf("回滚到 %s", sourceID),
-		LoginIP:       clientIP(r),
-		CreatedAt:     now,
-		StartedAt:     now,
-		BackupFile:    source.BackupFile,
-		ServiceName:   source.ServiceName,
-		TargetDir:     source.TargetDir,
+		ID:                 id,
+		Type:               "rollback",
+		RollbackOf:         sourceID,
+		Version:            source.Version,
+		ProjectID:          projectID,
+		ProjectName:        source.ProjectName,
+		ReplaceMode:        source.ReplaceMode,
+		BackupIgnore:       append([]string{}, source.BackupIgnore...),
+		ReplaceIgnore:      append([]string{}, source.ReplaceIgnore...),
+		Status:             "queued",
+		Note:               fmt.Sprintf("回滚到 %s", sourceID),
+		LoginIP:            clientIP(r),
+		CreatedAt:          now,
+		StartedAt:          now,
+		BackupFile:         source.BackupFile,
+		ServiceName:        source.ServiceName,
+		TargetDir:          source.TargetDir,
+		InitialDeploy:      source.InitialDeploy,
+		BackupSkipped:      source.BackupSkipped,
+		ServiceInstallMode: source.ServiceInstallMode,
+		ServiceExePath:     source.ServiceExePath,
+		ServiceArgs:        append([]string{}, source.ServiceArgs...),
+		ServiceDisplayName: source.ServiceDisplayName,
+		ServiceDescription: source.ServiceDescription,
+		ServiceStartType:   source.ServiceStartType,
 	}
 	if err := a.store.Add(rollback); err != nil {
 		http.Error(w, "回滚任务创建失败", http.StatusInternalServerError)
@@ -874,6 +965,9 @@ func (a *App) handleSaveSystemConfig(w http.ResponseWriter, r *http.Request) {
 	newCfg.DeploymentsFile = strings.TrimSpace(r.FormValue("deployments_file"))
 	newCfg.LogFile = strings.TrimSpace(r.FormValue("log_file"))
 	newCfg.NotifyEmail = strings.TrimSpace(r.FormValue("notify_email"))
+	if _, ok := r.Form["nssm_exe_path"]; ok {
+		newCfg.NSSMExePath = strings.TrimSpace(r.FormValue("nssm_exe_path"))
+	}
 	if _, ok := r.Form["notify_email_auth_code"]; ok {
 		if authCode := strings.TrimSpace(r.FormValue("notify_email_auth_code")); authCode != "" {
 			newCfg.NotifyEmailAuthCode = authCode
@@ -935,6 +1029,13 @@ func (a *App) handleSaveProjectConfig(w http.ResponseWriter, r *http.Request) {
 	project.ServiceName = strings.TrimSpace(r.FormValue("service_name"))
 	project.TargetDir = strings.TrimSpace(r.FormValue("target_dir"))
 	project.CurrentVersion = normalizeVersion(r.FormValue("current_version"))
+	project.AllowInitialDeploy = parseBoolFormValue(r.FormValue("allow_initial_deploy"))
+	project.ServiceInstallMode = normalizeServiceInstallMode(r.FormValue("service_install_mode"))
+	project.ServiceExePath = strings.TrimSpace(r.FormValue("service_exe_path"))
+	project.ServiceArgs = splitLinesTrim(r.FormValue("service_args_text"))
+	project.ServiceDisplayName = strings.TrimSpace(r.FormValue("service_display_name"))
+	project.ServiceDescription = strings.TrimSpace(r.FormValue("service_description"))
+	project.ServiceStartType = normalizeServiceStartType(r.FormValue("service_start_type"))
 	if project.CurrentVersion == "" {
 		project.CurrentVersion = "0.0.1"
 	}
@@ -1026,6 +1127,13 @@ func (a *App) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
 		TargetDir:          strings.TrimSpace(r.FormValue("target_dir")),
 		CurrentVersion:     normalizeVersion(r.FormValue("current_version")),
 		DefaultReplaceMode: normalizeReplaceMode(r.FormValue("default_replace_mode")),
+		AllowInitialDeploy: parseBoolFormValue(r.FormValue("allow_initial_deploy")),
+		ServiceInstallMode: normalizeServiceInstallMode(r.FormValue("service_install_mode")),
+		ServiceExePath:     strings.TrimSpace(r.FormValue("service_exe_path")),
+		ServiceArgs:        splitLinesTrim(r.FormValue("service_args_text")),
+		ServiceDisplayName: strings.TrimSpace(r.FormValue("service_display_name")),
+		ServiceDescription: strings.TrimSpace(r.FormValue("service_description")),
+		ServiceStartType:   normalizeServiceStartType(r.FormValue("service_start_type")),
 		MaxUploadMB:        maxUploadMB,
 		BackupIgnore:       splitLinesTrim(r.FormValue("backup_ignore_text")),
 		ReplaceIgnore:      splitLinesTrim(r.FormValue("replace_ignore_text")),
@@ -1154,6 +1262,7 @@ func configSnapshot(cfg Config) map[string]any {
 		"backup_dir":                 cfg.BackupDir,
 		"deployments_file":           cfg.DeploymentsFile,
 		"log_file":                   cfg.LogFile,
+		"nssm_exe_path":              cfg.NSSMExePath,
 		"notify_email":               cfg.NotifyEmail,
 		"notify_email_auth_code_set": strings.TrimSpace(cfg.NotifyEmailAuthCode) != "",
 		"self_update_service_name":   cfg.SelfUpdateServiceName,
@@ -1161,6 +1270,13 @@ func configSnapshot(cfg Config) map[string]any {
 		"target_dir":                 dp.TargetDir,
 		"replace_mode":               dp.DefaultReplaceMode,
 		"default_replace_mode":       dp.DefaultReplaceMode,
+		"allow_initial_deploy":       dp.AllowInitialDeploy,
+		"service_install_mode":       dp.ServiceInstallMode,
+		"service_exe_path":           dp.ServiceExePath,
+		"service_args_text":          strings.Join(dp.ServiceArgs, "\n"),
+		"service_display_name":       dp.ServiceDisplayName,
+		"service_description":        dp.ServiceDescription,
+		"service_start_type":         dp.ServiceStartType,
 		"backup_ignore_text":         strings.Join(dp.BackupIgnore, "\n"),
 		"replace_ignore_text":        strings.Join(dp.ReplaceIgnore, "\n"),
 		"max_upload_mb":              dp.MaxUploadMB,
@@ -1630,6 +1746,17 @@ func validateRuntimeConfig(cfg Config) error {
 		}
 		if p.MaxUploadMB <= 0 {
 			return fmt.Errorf("projects(%s).max_upload_mb 必须大于 0", p.ID)
+		}
+		if p.ServiceInstallMode != ServiceInstallModeNone {
+			if strings.TrimSpace(p.ServiceName) == "" {
+				return fmt.Errorf("projects(%s).service_name 不能为空（启用服务安装时必填）", p.ID)
+			}
+			if p.ServiceInstallMode != ServiceInstallModeWindows && p.ServiceInstallMode != ServiceInstallModeNSSM {
+				return fmt.Errorf("projects(%s).service_install_mode 非法: %s", p.ID, p.ServiceInstallMode)
+			}
+			if strings.TrimSpace(p.ServiceExePath) == "" {
+				return fmt.Errorf("projects(%s).service_exe_path 不能为空（启用服务安装时请填写压缩包解压后的 exe 文件名或相对路径）", p.ID)
+			}
 		}
 	}
 	if strings.TrimSpace(cfg.DefaultProjectID) == "" {

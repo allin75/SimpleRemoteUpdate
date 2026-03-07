@@ -37,8 +37,10 @@ func (a *App) runDeployment(id, projectID string) {
 		return
 	}
 	cfg := a.currentConfig()
+	var project ManagedProject
 	if dep.ProjectID != "" {
 		if p, exists := findProjectByID(cfg.Projects, dep.ProjectID); exists {
+			project = p
 			dep.ServiceName = p.ServiceName
 			if dep.TargetDir == "" {
 				dep.TargetDir = p.TargetDir
@@ -48,6 +50,24 @@ func (a *App) runDeployment(id, projectID string) {
 			}
 			if len(dep.ReplaceIgnore) == 0 {
 				dep.ReplaceIgnore = append([]string{}, p.ReplaceIgnore...)
+			}
+			if dep.ServiceInstallMode == "" {
+				dep.ServiceInstallMode = p.ServiceInstallMode
+			}
+			if dep.ServiceExePath == "" {
+				dep.ServiceExePath = p.ServiceExePath
+			}
+			if len(dep.ServiceArgs) == 0 {
+				dep.ServiceArgs = append([]string{}, p.ServiceArgs...)
+			}
+			if dep.ServiceDisplayName == "" {
+				dep.ServiceDisplayName = p.ServiceDisplayName
+			}
+			if dep.ServiceDescription == "" {
+				dep.ServiceDescription = p.ServiceDescription
+			}
+			if dep.ServiceStartType == "" {
+				dep.ServiceStartType = p.ServiceStartType
 			}
 		}
 	}
@@ -84,13 +104,48 @@ func (a *App) runDeployment(id, projectID string) {
 	}
 
 	a.publishProgress(id, "info", "准备部署", 5, "部署开始")
+	targetExists, targetEmpty, targetCheckErr := inspectTargetDirState(dep.TargetDir)
+	if targetCheckErr != nil {
+		finish("failed", fmt.Errorf("检查目标目录失败: %w", targetCheckErr), nil, "")
+		a.publish(id, "error", "检查目标目录失败: %v", targetCheckErr)
+		return
+	}
+	targetHasExistingFiles := targetExists && !targetEmpty
+	dep.InitialDeploy = isRuntimeInitialDeploy(targetExists, targetEmpty, dep.ClearTargetBeforeDeploy)
+	dep.ServiceInstallMode = normalizeServiceInstallMode(dep.ServiceInstallMode)
+	dep.ServiceStartType = normalizeServiceStartType(dep.ServiceStartType)
+	_ = a.store.UpdateField(id, func(d *Deployment) {
+		d.InitialDeploy = dep.InitialDeploy
+		d.ServiceInstallMode = dep.ServiceInstallMode
+		d.ServiceExePath = dep.ServiceExePath
+		d.ServiceArgs = append([]string{}, dep.ServiceArgs...)
+		d.ServiceDisplayName = dep.ServiceDisplayName
+		d.ServiceDescription = dep.ServiceDescription
+		d.ServiceStartType = dep.ServiceStartType
+		d.ClearTargetBeforeDeploy = dep.ClearTargetBeforeDeploy
+	})
+	if dep.InitialDeploy {
+		if dep.ClearTargetBeforeDeploy && targetHasExistingFiles {
+			a.publish(id, "warn", "首次部署专页检测到目标目录已有内容：确认后将先清空该目录，再执行首次部署")
+		} else {
+			a.publish(id, "info", "检测到首次部署：目标目录为空或不存在")
+		}
+		if project.ID != "" && !project.AllowInitialDeploy {
+			finish("failed", errors.New("当前程序未开启首次部署，请在程序配置中勾选 allow_initial_deploy 后重试"), nil, "")
+			a.publish(id, "error", "当前程序未开启首次部署，请在程序配置中勾选 allow_initial_deploy 后重试")
+			return
+		}
+	}
 	backupRules := dep.BackupIgnore
 	if len(backupRules) == 0 {
 		backupRules = cfg.BackupIgnore
 	}
 	backupIgnore := loadBackupIgnoreMatcherForTarget(dep.TargetDir, backupRules)
 	replaceRules := dep.ReplaceIgnore
-	if len(replaceRules) == 0 {
+	if dep.InitialDeploy {
+		replaceRules = nil
+		a.publish(id, "info", "首次部署不应用 replace_ignore / backup_ignore，压缩包内容会完整下发")
+	} else if len(replaceRules) == 0 {
 		replaceRules = resolveReplaceIgnoreRulesForTarget(dep.TargetDir, cfg.ReplaceIgnore, cfg.BackupIgnore)
 	}
 	replaceIgnore := newIgnoreMatcher(append(append([]string{}, replaceRules...), ".replaceignore"))
@@ -103,14 +158,27 @@ func (a *App) runDeployment(id, projectID string) {
 	}
 
 	backupPath := filepath.Join(cfg.BackupDir, id+".zip")
-	a.publishProgress(id, "info", "备份目标目录", 15, "开始备份目标目录")
-	if err := zipDirectory(dep.TargetDir, backupPath, backupIgnore); err != nil {
-		finish("failed", fmt.Errorf("备份失败: %w", err), nil, "")
-		a.publish(id, "error", "备份失败: %v", err)
-		return
+	if dep.InitialDeploy {
+		backupPath = ""
+		dep.BackupSkipped = true
+		_ = a.store.UpdateField(id, func(d *Deployment) {
+			d.BackupFile = ""
+			d.BackupSkipped = true
+		})
+		a.publishProgress(id, "info", "备份目标目录", 30, "首次部署跳过备份：目标目录为空或不存在")
+	} else {
+		a.publishProgress(id, "info", "备份目标目录", 15, "开始备份目标目录")
+		if err := zipDirectory(dep.TargetDir, backupPath, backupIgnore); err != nil {
+			finish("failed", fmt.Errorf("备份失败: %w", err), nil, "")
+			a.publish(id, "error", "备份失败: %v", err)
+			return
+		}
+		_ = a.store.UpdateField(id, func(d *Deployment) {
+			d.BackupFile = backupPath
+			d.BackupSkipped = false
+		})
+		a.publishProgress(id, "info", "备份目标目录", 30, "备份完成: %s", backupPath)
 	}
-	_ = a.store.UpdateField(id, func(d *Deployment) { d.BackupFile = backupPath })
-	a.publishProgress(id, "info", "备份目标目录", 30, "备份完成: %s", backupPath)
 
 	workDir := filepath.Join(cfg.WorkDir, id)
 	extractDir := filepath.Join(workDir, "extract")
@@ -130,7 +198,19 @@ func (a *App) runDeployment(id, projectID string) {
 	}
 
 	serviceManaged := dep.ServiceName != ""
+	serviceExistsNow := false
+	serviceShouldCreate := false
 	if serviceManaged {
+		var serviceErr error
+		serviceExistsNow, serviceErr = serviceExists(dep.ServiceName)
+		if serviceErr != nil {
+			finish("failed", fmt.Errorf("检查服务状态失败: %w", serviceErr), nil, backupPath)
+			a.publish(id, "error", "检查服务状态失败: %v", serviceErr)
+			return
+		}
+		serviceShouldCreate = !serviceExistsNow && dep.ServiceInstallMode != ServiceInstallModeNone
+	}
+	if serviceManaged && serviceExistsNow {
 		a.publishProgress(id, "info", "停止服务", 55, "停止服务: %s", dep.ServiceName)
 		if err := stopService(dep.ServiceName, 45*time.Second); err != nil {
 			finish("failed", fmt.Errorf("停止服务失败: %w", err), nil, backupPath)
@@ -139,8 +219,30 @@ func (a *App) runDeployment(id, projectID string) {
 		}
 		a.publish(id, "info", "服务已停止")
 		a.waitAfterServiceStop(id, "替换文件", 60, dep.ServiceName)
+	} else if serviceManaged && serviceShouldCreate {
+		a.publish(id, "info", "服务 %s 当前不存在，将在部署完成后自动创建", dep.ServiceName)
+	} else if serviceManaged {
+		finish("failed", fmt.Errorf("服务 %s 不存在，且当前项目未启用服务安装", dep.ServiceName), nil, backupPath)
+		a.publish(id, "error", "服务 %s 不存在，且当前项目未启用服务安装", dep.ServiceName)
+		return
 	} else {
 		a.publish(id, "warn", "service_name 为空，跳过停止服务，直接替换文件")
+	}
+	if err := os.MkdirAll(dep.TargetDir, 0755); err != nil {
+		finish("failed", fmt.Errorf("创建目标目录失败: %w", err), nil, backupPath)
+		a.publish(id, "error", "创建目标目录失败: %v", err)
+		return
+	}
+	if dep.ClearTargetBeforeDeploy && targetHasExistingFiles {
+		a.publishProgress(id, "warn", "清空目标目录", 66, "检测到首次部署前目标目录已有内容，开始清空目标目录")
+		if err := a.runFileOpWithRetry(id, "清空目标目录", 66, "清空目标目录", func() error {
+			return clearDirWithIgnore(dep.TargetDir, newIgnoreMatcher(nil))
+		}); err != nil {
+			finish("failed", fmt.Errorf("清空目标目录失败: %w", err), nil, backupPath)
+			a.publish(id, "error", "清空目标目录失败: %v", err)
+			return
+		}
+		a.publish(id, "warn", "目标目录已清空，开始部署压缩包内容")
 	}
 
 	a.publishProgress(id, "info", "替换文件", 70, "开始替换文件")
@@ -161,6 +263,23 @@ func (a *App) runDeployment(id, projectID string) {
 		return
 	}
 	a.publishProgress(id, "info", "替换文件", 82, "文件替换完成，变更文件数: %d", len(changed))
+	if serviceShouldCreate {
+		serviceCfg, cfgErr := buildServiceInstallConfig(cfg, dep)
+		if cfgErr != nil {
+			finish("failed", cfgErr, changed, backupPath)
+			a.publish(id, "error", "%v", cfgErr)
+			return
+		}
+		a.publishProgress(id, "info", "安装服务", 86, "创建服务: %s", dep.ServiceName)
+		if err := createService(dep.ServiceName, serviceCfg); err != nil {
+			finish("failed", fmt.Errorf("创建服务失败: %w", err), changed, backupPath)
+			a.publish(id, "error", "创建服务失败: %v", err)
+			return
+		}
+		dep.ServiceCreated = true
+		_ = a.store.UpdateField(id, func(d *Deployment) { d.ServiceCreated = true })
+		a.publish(id, "info", "服务已创建: %s", dep.ServiceName)
+	}
 
 	if serviceManaged {
 		a.publishProgress(id, "info", "启动服务", 90, "启动服务: %s", dep.ServiceName)
@@ -527,6 +646,66 @@ func resolveSelfUpdateServiceName(cfg Config) string {
 func (a *App) waitAfterServiceStop(depID, stage string, progress int, serviceName string) {
 	a.publishProgress(depID, "info", stage, progress, "服务已停止，等待 %.1f 秒释放文件句柄: %s", postStopSettleDelay.Seconds(), serviceName)
 	time.Sleep(postStopSettleDelay)
+}
+
+func isTargetInitialDeploy(targetExists, targetEmpty bool) bool {
+	return !targetExists || targetEmpty
+}
+
+func isPreviewInitialDeploy(targetExists, targetEmpty bool, deployEntry string) bool {
+	if isTargetInitialDeploy(targetExists, targetEmpty) {
+		return true
+	}
+	return normalizeDeployEntry(deployEntry) == DeployEntryInitial
+}
+
+func isRuntimeInitialDeploy(targetExists, targetEmpty bool, clearTargetBeforeDeploy bool) bool {
+	if isTargetInitialDeploy(targetExists, targetEmpty) {
+		return true
+	}
+	return clearTargetBeforeDeploy && targetExists && !targetEmpty
+}
+
+func inspectTargetDirState(target string) (exists bool, empty bool, err error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false, true, errors.New("目标目录为空")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, true, nil
+		}
+		return false, false, err
+	}
+	if !info.IsDir() {
+		return false, false, fmt.Errorf("目标路径不是目录: %s", target)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return true, false, err
+	}
+	return true, len(entries) == 0, nil
+}
+
+func buildServiceInstallConfig(cfg Config, dep Deployment) (ServiceInstallConfig, error) {
+	exePath := strings.TrimSpace(dep.ServiceExePath)
+	if exePath == "" {
+		return ServiceInstallConfig{}, errors.New("启用服务安装时，必须填写压缩包解压后的 exe 文件名或相对路径")
+	}
+	if !filepath.IsAbs(exePath) {
+		exePath = filepath.Join(dep.TargetDir, filepath.FromSlash(exePath))
+	}
+	return ServiceInstallConfig{
+		Name:           dep.ServiceName,
+		InstallMode:    dep.ServiceInstallMode,
+		DisplayName:    firstNonEmpty(dep.ServiceDisplayName, dep.ServiceName),
+		Description:    dep.ServiceDescription,
+		ExecutablePath: exePath,
+		Arguments:      append([]string{}, dep.ServiceArgs...),
+		StartType:      dep.ServiceStartType,
+		NSSMExePath:    strings.TrimSpace(cfg.NSSMExePath),
+	}, nil
 }
 
 func (a *App) runFileOpWithRetry(depID, stage string, progress int, opName string, fn func() error) error {

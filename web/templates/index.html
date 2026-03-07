@@ -3,18 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>远程更新控制台</title>
+  <title>远程更新控制台 - {{.PageTitle}}</title>
   <script src="https://unpkg.com/htmx.org@2.0.0"></script>
   <link rel="stylesheet" href="/static/theme.css">
 </head>
-<body class="min-h-screen bg-slate-100 text-slate-800">
+<body class="min-h-screen bg-slate-100 text-slate-800" data-page-mode="{{if .InitialDeployPage}}initial{{else}}standard{{end}}" data-initial-deploy-url="{{.InitialDeployPath}}" data-standard-deploy-url="{{.StandardDeployPath}}">
   <div class="max-w-7xl mx-auto p-4 md:p-6 space-y-4">
     <header class="bg-white rounded-xl shadow p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
       <div>
         <h1 class="text-2xl font-semibold">远程更新控制台</h1>
         <p id="runtime-summary" class="text-sm text-slate-500">服务: {{.ServiceName}} | 目录: {{.TargetDir}} | 当前版本: {{.CurrentVersion}}</p>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <a href="{{.StandardDeployPath}}" class="px-4 py-2 rounded border text-sm {{if .InitialDeployPage}}border-slate-300 hover:bg-slate-50{{else}}border-sky-300 bg-sky-50 text-sky-700{{end}}">常规部署</a>
+        <a href="{{.InitialDeployPath}}" class="px-4 py-2 rounded border text-sm {{if .InitialDeployPage}}border-amber-300 bg-amber-50 text-amber-700{{else}}border-slate-300 hover:bg-slate-50{{end}}">首次部署专页</a>
         <button id="open-self-update-btn" type="button" class="px-4 py-2 rounded border border-violet-300 text-violet-700 hover:bg-violet-50">自更新</button>
         <button id="open-system-config-btn" type="button" class="px-4 py-2 rounded border border-slate-300 hover:bg-slate-50">系统配置</button>
         <form method="post" action="/logout">
@@ -27,13 +29,102 @@
       <aside class="bg-white rounded-xl shadow p-4 space-y-3">
         <div class="flex items-center justify-between">
           <h2 class="text-lg font-semibold">程序列表</h2>
+          {{if not .InitialDeployPage}}
           <button id="add-project-btn" type="button" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">新增</button>
+          {{end}}
         </div>
-        <p class="text-xs text-slate-500">每个程序拥有独立配置，互不干扰</p>
+        <p class="text-xs text-slate-500">{{if .InitialDeployPage}}这里只处理首次部署专用设置和首次下发，降低新手误操作。{{else}}每个程序拥有独立配置，互不干扰；首次部署请使用上方专页。{{end}}</p>
         <div id="project-sidebar" class="space-y-2"></div>
       </aside>
 
       <div class="space-y-4">
+        {{if .InitialDeployPage}}
+        <section class="bg-white rounded-xl shadow p-4 space-y-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-lg font-semibold">首次部署设置</h2>
+              <p id="active-project-title" class="text-xs text-slate-500">未选择程序</p>
+            </div>
+            <a href="{{.StandardDeployPath}}" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">返回常规配置</a>
+          </div>
+          <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+            这个页面只保留首次部署会用到的开关和服务安装项。常规配置、日常更新、版本策略仍在“常规部署”页面处理。
+          </div>
+          <div class="rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 text-sm text-sky-900">
+            如果服务安装方式选择 <span class="font-semibold font-mono">nssm</span>，请务必将 <span class="font-semibold font-mono">nssm.exe</span> 一并打包到部署包中，并确保 <span class="font-semibold font-mono">nssm_exe_path</span> 与压缩包解压后的实际位置一致；否则首次部署时将无法创建服务。
+          </div>
+          <form id="project-form" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            <label class="block text-sm">
+              project_id
+              <input name="project_id" readonly class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono bg-slate-50 opacity-80" />
+            </label>
+            <label class="block text-sm">
+              name
+              <input name="name" readonly class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm bg-slate-50" />
+            </label>
+            <label class="block text-sm">
+              current_version
+              <input name="current_version" readonly class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm bg-slate-50" />
+            </label>
+            <label class="block text-sm">
+              service_name
+              <input name="service_name" readonly class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm bg-slate-50" />
+              <span class="mt-1 block text-xs text-slate-500">服务名为空时，首次部署只会下发文件，不会创建或控制服务。</span>
+            </label>
+            <label class="block text-sm md:col-span-2">
+              target_dir
+              <input name="target_dir" readonly class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono bg-slate-50" />
+            </label>
+            <label class="inline-flex items-center gap-2 text-sm">
+              <input name="allow_initial_deploy" type="checkbox" class="rounded border border-slate-300" />
+              允许首次部署（目标目录为空/不存在时允许直接下发）
+            </label>
+            <label class="block text-sm md:col-span-2">
+              service_install_mode
+              <select name="service_install_mode" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm">
+                <option value="none">none（不自动创建服务）</option>
+                <option value="nssm">nssm（用 NSSM 包装普通程序为 Windows 服务，推荐）</option>
+                <option value="windows_service">windows_service（首次部署后自动创建 Windows 服务）</option>
+              </select>
+              <span class="mt-1 block text-xs text-slate-500">原生 Windows 服务可选 windows_service；普通 Web/控制台程序建议选 nssm。</span>
+            </label>
+            <label class="block text-sm md:col-span-2 xl:col-span-3">
+              服务启动文件（填写压缩包解压后的 exe 文件名或相对路径）
+              <input name="service_exe_path" placeholder="例如 MyApp.exe 或 bin/MyApp.exe" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono" />
+              <span class="mt-1 block text-xs text-slate-500">通常不用填绝对路径。程序会在首次部署完成后，按 target_dir + 这里填写的相对路径去创建 Windows 服务。</span>
+            </label>
+            <label class="block text-sm">
+              service_display_name（可选）
+              <input name="service_display_name" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+            </label>
+            <label class="block text-sm">
+              service_start_type
+              <select name="service_start_type" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm">
+                <option value="automatic">automatic</option>
+                <option value="manual">manual</option>
+                <option value="disabled">disabled</option>
+              </select>
+            </label>
+            <label class="block text-sm md:col-span-2 xl:col-span-3">
+              service_description（可选）
+              <textarea name="service_description" rows="2" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"></textarea>
+            </label>
+            <label class="block text-sm md:col-span-2 xl:col-span-3">
+              service_args_text（服务启动参数，每行一个）
+              <textarea name="service_args_text" rows="3" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"></textarea>
+            </label>
+            <input name="max_upload_mb" type="hidden" />
+            <input name="default_replace_mode" type="hidden" />
+            <textarea name="backup_ignore_text" hidden></textarea>
+            <textarea name="replace_ignore_text" hidden></textarea>
+            <input name="set_default_project" type="hidden" value="false" />
+            <div class="md:col-span-2 xl:col-span-3 flex items-center gap-3">
+              <button type="submit" class="px-4 py-2 rounded bg-amber-600 text-white hover:bg-amber-500">保存首次部署设置</button>
+              <span id="project-message" class="text-sm text-slate-600"></span>
+            </div>
+          </form>
+        </section>
+        {{else}}
         <section class="bg-white rounded-xl shadow p-4 space-y-3">
           <div class="flex items-center justify-between">
             <div>
@@ -41,6 +132,9 @@
               <p id="active-project-title" class="text-xs text-slate-500">未选择程序</p>
             </div>
             <button id="delete-project-btn" type="button" class="text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50">删除当前程序</button>
+          </div>
+          <div class="rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 text-sm text-sky-900">
+            首次部署相关开关、服务安装和首次下发操作，已移动到上方“首次部署专页”，这里仅保留日常配置和常规更新。
           </div>
           <form id="project-form" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
             <label class="block text-sm">
@@ -75,6 +169,13 @@
                 <option value="partial">partial（局部替换，只覆盖上传包内文件）</option>
               </select>
             </label>
+            <input name="allow_initial_deploy" type="hidden" />
+            <input name="service_install_mode" type="hidden" />
+            <input name="service_exe_path" type="hidden" />
+            <input name="service_display_name" type="hidden" />
+            <input name="service_start_type" type="hidden" />
+            <textarea name="service_description" hidden></textarea>
+            <textarea name="service_args_text" hidden></textarea>
             <label class="block text-sm md:col-span-2 xl:col-span-3">
               <span class="inline-flex items-center">
                 backup_ignore_text（每行一个忽略规则）
@@ -103,14 +204,26 @@
             </div>
           </form>
         </section>
+        {{end}}
 
       </div>
     </section>
 
     <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <div class="bg-white rounded-xl shadow p-4 space-y-3">
-        <h2 class="text-lg font-semibold">上传部署包</h2>
+        <h2 class="text-lg font-semibold">{{if .InitialDeployPage}}首次部署下发{{else}}上传部署包{{end}}</h2>
+        {{if .InitialDeployPage}}
+        <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+          这里只处理空目录/新环境的首次下发。若目标目录已经有内容，系统会阻止继续，请回到“常规部署”页面操作。首次部署不会应用文件忽略规则，压缩包里的文件会完整下发。
+        </div>
+        {{else}}
+        <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700">
+          常规部署页不会再执行首次部署；如果目标目录为空或不存在，预演后会提示你切换到“首次部署专页”。
+        </div>
+        {{end}}
         <form id="upload-form" class="space-y-3">
+          <input type="hidden" name="deploy_entry" value="{{if .InitialDeployPage}}initial{{else}}standard{{end}}" />
+          <input type="hidden" name="clear_target_before_deploy" value="false" />
           <label class="block text-sm">
             选择程序
             <select id="project-select" name="project_id"
@@ -127,12 +240,20 @@
                    class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
             <span id="next-version-label" class="mt-1 block text-xs text-slate-500">默认下一版本: -</span>
           </label>
+          {{if not .InitialDeployPage}}
           <label class="block text-sm">
             计划执行时间（可选，到点自动更新）
             <input id="scheduled-at-input" type="datetime-local" name="scheduled_at"
                    class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300 bg-white" />
             <span class="mt-1 block text-xs text-slate-500">留空立即执行；已设置则进入等待队列，可在部署记录中取消。</span>
           </label>
+          {{else}}
+          <input id="scheduled-at-input" type="hidden" name="scheduled_at" />
+          {{end}}
+          {{if .InitialDeployPage}}
+          <input id="upload-replace-mode" type="hidden" name="replace_mode" value="full" />
+          <div class="text-xs text-slate-500">首次部署固定按空目录下发处理，无需再选择替换模式。</div>
+          {{else}}
           <label class="block text-sm">
             本次替换模式
             <select id="upload-replace-mode" name="replace_mode"
@@ -142,11 +263,12 @@
             </select>
             <span class="mt-1 block text-xs text-slate-500">可按本次发布切换；局部替换不会删除目标目录已有文件</span>
           </label>
+          {{end}}
           <label class="block text-sm">
             更新说明（可编辑）
             <textarea name="note" rows="3" class="mt-1 block w-full text-sm border rounded px-3 py-2 border-slate-300"></textarea>
           </label>
-          <button type="submit" class="px-4 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-500">开始上传并部署</button>
+          <button type="submit" class="px-4 py-2 rounded {{if .InitialDeployPage}}bg-amber-600 hover:bg-amber-500{{else}}bg-emerald-600 hover:bg-emerald-500{{end}} text-white">{{if .InitialDeployPage}}开始首次部署{{else}}开始上传并部署{{end}}</button>
         </form>
 
         <div class="space-y-1">
@@ -231,6 +353,16 @@
           <option value="partial">partial（局部替换）</option>
         </select>
       </label>
+      <div class="md:col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+        首次部署开关和服务安装参数将在“首次部署专页”中单独设置，新建程序默认按最安全方式创建。
+      </div>
+      <input name="allow_initial_deploy" type="hidden" value="false" />
+      <input name="service_install_mode" type="hidden" value="none" />
+      <input name="service_exe_path" type="hidden" value="" />
+      <input name="service_display_name" type="hidden" value="" />
+      <input name="service_start_type" type="hidden" value="automatic" />
+      <textarea name="service_description" hidden></textarea>
+      <textarea name="service_args_text" hidden></textarea>
       <label class="block text-sm md:col-span-2">
         <span class="inline-flex items-center">
           backup_ignore_text（每行一个）
@@ -300,6 +432,12 @@
       <label class="block text-sm">
         log_file
         <input name="log_file" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+      </label>
+      <label class="block text-sm md:col-span-2 xl:col-span-3">
+        nssm_exe_path（可选）
+        <input name="nssm_exe_path" placeholder="例如 nssm.exe、tools/nssm.exe 或 C:/Tools/nssm/win64/nssm.exe"
+               class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono" />
+        <span class="mt-1 block text-xs text-slate-500">支持相对路径；相对路径会按服务程序所在目录解析。留空时优先尝试程序目录下的 `nssm.exe`，再尝试 PATH。</span>
       </label>
       <label class="block text-sm">
         notify_email（通知邮箱，默认按 QQ SMTP）

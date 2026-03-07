@@ -1,4 +1,7 @@
 (() => {
+  const pageMode = `${document.body?.dataset?.pageMode || "standard"}`.trim().toLowerCase();
+  const initialDeployURL = `${document.body?.dataset?.initialDeployUrl || "/initial-deploy"}`.trim() || "/initial-deploy";
+  const standardDeployURL = `${document.body?.dataset?.standardDeployUrl || "/"}`.trim() || "/";
   const uploadForm = document.getElementById("upload-form");
   const progressBar = document.getElementById("upload-progress-bar");
   const progressLabel = document.getElementById("upload-progress-label");
@@ -55,12 +58,93 @@
   const changesPreviewHint = document.getElementById("changes-preview-hint");
   const changesPreviewCancel = document.getElementById("changes-preview-cancel");
   const changesPreviewConfirm = document.getElementById("changes-preview-confirm");
+  const activeProjectStorageKey = "updater.activeProjectId";
 
   let eventSource = null;
   let configCache = null;
   let projectsCache = [];
   let activeProjectId = "";
   let pendingUploadPayload = null;
+
+  function getQueryProjectId() {
+    try {
+      return `${new URLSearchParams(window.location.search).get("project_id") || ""}`.trim();
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  function getStoredProjectId() {
+    try {
+      return `${window.sessionStorage.getItem(activeProjectStorageKey) || ""}`.trim();
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  function setStoredProjectId(projectID) {
+    try {
+      if (`${projectID || ""}`.trim()) {
+        window.sessionStorage.setItem(activeProjectStorageKey, `${projectID}`.trim());
+      } else {
+        window.sessionStorage.removeItem(activeProjectStorageKey);
+      }
+    } catch (_err) {}
+  }
+
+  function buildProjectPageURL(baseURL, projectID) {
+    const url = new URL(baseURL, window.location.origin);
+    const pid = `${projectID || ""}`.trim();
+    if (pid) {
+      url.searchParams.set("project_id", pid);
+    } else {
+      url.searchParams.delete("project_id");
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
+  function syncProjectNavigation(projectID = activeProjectId) {
+    const pid = `${projectID || ""}`.trim();
+    document.querySelectorAll(`a[href="${standardDeployURL}"], a[href="${initialDeployURL}"]`).forEach((link) => {
+      const href = `${link.getAttribute("href") || ""}`.trim();
+      if (href === standardDeployURL || href === initialDeployURL) {
+        link.setAttribute("href", buildProjectPageURL(href, pid));
+      }
+    });
+    try {
+      const currentURL = new URL(window.location.href);
+      if (pid) {
+        currentURL.searchParams.set("project_id", pid);
+      } else {
+        currentURL.searchParams.delete("project_id");
+      }
+      window.history.replaceState(null, "", `${currentURL.pathname}${currentURL.search}${currentURL.hash}`);
+    } catch (_err) {}
+  }
+
+  function getPreviewSummary(dep) {
+    const summary = dep?.summary || {};
+    return {
+      total: Number(summary.total || 0),
+      added: Number(summary.added || 0),
+      updated: Number(summary.updated || 0),
+      deleted: Number(summary.deleted || 0),
+    };
+  }
+
+  function buildDeletionConfirmMessage(dep) {
+    const summary = getPreviewSummary(dep);
+    const projectName = dep?.project_name || dep?.project_id || "当前程序";
+    if (summary.deleted > 0) {
+      return `检测到常规部署将删除目标目录中 ${summary.deleted} 个现有文件。确认继续后，这些不在压缩包内的文件会被删除。是否继续部署？`;
+    }
+    return `${projectName} 当前使用 full 全量替换。确认继续后，目标目录中不在压缩包内的现有文件可能被删除。是否继续部署？`;
+  }
+
+  function buildInitialClearConfirmMessage(dep) {
+    const projectName = dep?.project_name || dep?.project_id || "当前程序";
+    return `${projectName} 的目标目录中已存在文件。确认继续后，系统会先清空该目录中的现有内容，再执行首次部署；此操作不可恢复。是否继续？`;
+  }
 
   function setText(el, text) {
     if (el) el.textContent = text;
@@ -223,11 +307,19 @@
     changesPreviewConfirm.textContent = `${text || ""}`.trim() || "确认部署";
   }
 
+  function setPreviewConfirmEnabled(enabled) {
+    if (!changesPreviewConfirm) return;
+    changesPreviewConfirm.disabled = !enabled;
+    changesPreviewConfirm.classList.toggle("opacity-50", !enabled);
+    changesPreviewConfirm.classList.toggle("cursor-not-allowed", !enabled);
+  }
+
   function clearPendingUpload() {
     pendingUploadPayload = null;
     setPreviewActionsVisible(false);
     setPreviewHint("");
     setPreviewConfirmLabel("确认部署");
+    setPreviewConfirmEnabled(true);
   }
 
   function getProjectByID(id) {
@@ -251,14 +343,20 @@
     const targetDir = p?.target_dir || "-";
     const currentVersion = p?.current_version || "-";
     const maxUpload = p?.max_upload_mb || "-";
-    setText(runtimeSummary, `服务: ${serviceName} | 目录: ${targetDir} | 当前版本: ${currentVersion}`);
+    const initialMode = p?.allow_initial_deploy ? "允许首次部署" : "仅更新已存在程序";
+    const installMode = p?.service_install_mode === "windows_service"
+      ? "自动安装原生 Windows 服务"
+      : p?.service_install_mode === "nssm"
+        ? "自动安装 NSSM 服务"
+        : "不安装服务";
+    setText(runtimeSummary, `服务: ${serviceName} | 目录: ${targetDir} | 当前版本: ${currentVersion} | ${initialMode} | ${installMode}`);
     setText(maxUploadLabel, maxUpload);
     setText(nextVersionLabel, `默认下一版本: ${nextPatchVersion(currentVersion || "0.0.1")}`);
     if (targetVersionInput) {
       targetVersionInput.placeholder = `留空自动递增为 ${nextPatchVersion(currentVersion || "0.0.1")}`;
     }
     if (uploadReplaceMode) {
-      uploadReplaceMode.value = p?.default_replace_mode === "partial" ? "partial" : "full";
+      uploadReplaceMode.value = pageMode === "initial" ? "full" : p?.default_replace_mode === "partial" ? "partial" : "full";
     }
   }
 
@@ -317,6 +415,7 @@
         <div class="mt-1 text-xs text-slate-500 font-mono break-all">${p.id}</div>
         <div class="mt-1 text-xs text-slate-500 break-all">版本: ${p.current_version || "-"} | 服务: ${p.service_name || "-"}</div>
         <div class="mt-1 text-xs text-slate-500 break-all">默认替换: ${p.default_replace_mode === "partial" ? "partial" : "full"}</div>
+        <div class="mt-1 text-xs text-slate-500 break-all">首次部署: ${p.allow_initial_deploy ? "允许" : "关闭"} | 服务安装: ${p.service_install_mode === "windows_service" ? "Windows 服务" : p.service_install_mode === "nssm" ? "NSSM" : "无"}</div>
       `;
       btn.addEventListener("click", () => selectProject(p.id));
       projectSidebar.appendChild(btn);
@@ -333,16 +432,51 @@
       target_dir: project?.target_dir || "",
       max_upload_mb: project?.max_upload_mb || "",
       default_replace_mode: project?.default_replace_mode === "partial" ? "partial" : "full",
+      service_install_mode: project?.service_install_mode === "windows_service"
+        ? "windows_service"
+        : project?.service_install_mode === "nssm"
+          ? "nssm"
+          : pageMode === "initial"
+            ? "nssm"
+            : "none",
+      service_exe_path: project?.service_exe_path || "",
+      service_display_name: project?.service_display_name || "",
+      service_description: project?.service_description || "",
+      service_start_type: project?.service_start_type || "automatic",
+      service_args_text: Array.isArray(project?.service_args) ? project.service_args.join("\n") : "",
       backup_ignore_text: Array.isArray(project?.backup_ignore) ? project.backup_ignore.join("\n") : "",
       replace_ignore_text: Array.isArray(project?.replace_ignore) ? project.replace_ignore.join("\n") : "",
     };
     Object.keys(map).forEach((k) => {
       const input = projectForm.elements.namedItem(k);
-      if (input) input.value = map[k];
+      if (!input) return;
+      if (input instanceof RadioNodeList) return;
+      if (`${input.type || ""}`.toLowerCase() === "checkbox") {
+        input.checked = Boolean(map[k]);
+        input.value = "true";
+        return;
+      }
+      input.value = map[k];
     });
     const setDefaultInput = projectForm.elements.namedItem("set_default_project");
     if (setDefaultInput) {
-      setDefaultInput.checked = configCache?.default_project_id === project?.id;
+      const checked = configCache?.default_project_id === project?.id;
+      if (`${setDefaultInput.type || ""}`.toLowerCase() === "checkbox") {
+        setDefaultInput.checked = checked;
+        setDefaultInput.value = "true";
+      } else {
+        setDefaultInput.value = checked ? "true" : "false";
+      }
+    }
+    const allowInitialInput = projectForm.elements.namedItem("allow_initial_deploy");
+    if (allowInitialInput) {
+      const checked = Boolean(project?.allow_initial_deploy);
+      if (`${allowInitialInput.type || ""}`.toLowerCase() === "checkbox") {
+        allowInitialInput.checked = checked;
+        allowInitialInput.value = "true";
+      } else {
+        allowInitialInput.value = checked ? "true" : "false";
+      }
     }
     const title = project ? `当前程序: ${project.name || project.id} (${project.id})` : "未选择程序";
     setText(activeProjectTitle, title);
@@ -358,6 +492,7 @@
       backup_dir: cfg.backup_dir || "",
       deployments_file: cfg.deployments_file || "",
       log_file: cfg.log_file || "",
+      nssm_exe_path: cfg.nssm_exe_path || "nssm.exe",
       notify_email: cfg.notify_email || "",
       self_update_service_name: cfg.self_update_service_name || "",
     };
@@ -376,11 +511,15 @@
     const project = getProjectByID(projectID) || projectsCache[0] || null;
     if (!project) {
       activeProjectId = "";
+      setStoredProjectId("");
+      syncProjectNavigation("");
       fillProjectForm(null);
       syncRuntimeMeta(null);
       return;
     }
     activeProjectId = project.id;
+    setStoredProjectId(project.id);
+    syncProjectNavigation(project.id);
     fillProjectForm(project);
     syncRuntimeMeta(project);
     renderSidebar(projectsCache, configCache?.default_project_id || "");
@@ -409,6 +548,8 @@
       renderDefaultProjectSelect(projectsCache, configCache.default_project_id);
       const candidateID =
         `${preferredProjectID || ""}`.trim() ||
+        `${getQueryProjectId() || ""}`.trim() ||
+        `${getStoredProjectId() || ""}`.trim() ||
         `${activeProjectId || ""}`.trim() ||
         `${configCache.default_project_id || ""}`.trim() ||
         (projectsCache[0] ? projectsCache[0].id : "");
@@ -497,7 +638,11 @@
     const changed = Array.isArray(dep?.changed) ? dep.changed : [];
     let replaceIgnore = Array.isArray(dep?.replace_ignore) ? dep.replace_ignore : [];
     const ignoredPaths = Array.isArray(dep?.ignored_paths) ? dep.ignored_paths : [];
-    if (replaceIgnore.length === 0 && projectForm) {
+    const initialDeploy = Boolean(dep?.initial_deploy);
+    const initialDeployAllowed = dep?.initial_deploy_allowed !== false;
+    const summary = getPreviewSummary(dep);
+    const hasDeleteRisk = !initialDeploy && `${dep?.replace_mode || "full"}`.trim().toLowerCase() === "full" && summary.deleted > 0;
+    if (!initialDeploy && replaceIgnore.length === 0 && projectForm) {
       const raw = `${projectForm.elements.namedItem("replace_ignore_text")?.value || ""}`;
       replaceIgnore = raw
         .split("\n")
@@ -507,9 +652,20 @@
 
     changesDialogTitle.textContent = titleText || "变更明细";
     changesDialogSubtitle.textContent =
-      `程序: ${dep?.project_name || dep?.project_id || "-"} | 类型: ${dep?.type || "-"} | 版本: ${dep?.version || "-"} | 状态: ${dep?.status || "-"} | 替换模式: ${dep?.replace_mode || "full"}`;
+      `程序: ${dep?.project_name || dep?.project_id || "-"} | 类型: ${dep?.type || "-"} | 版本: ${dep?.version || "-"} | 状态: ${dep?.status || "-"} | 替换模式: ${dep?.replace_mode || "full"} | 首次部署: ${initialDeploy ? "是" : "否"} | 服务安装: ${dep?.service_install_mode === "windows_service" ? "Windows 服务" : dep?.service_install_mode === "nssm" ? "NSSM" : "无"}`;
     if (`${dep?.type || ""}`.trim() === "preview" && changed.length === 0) {
       changesDialogSubtitle.textContent += " | 结果: 无文件变更，建议取消本次部署";
+    }
+    if (initialDeploy) {
+      changesDialogSubtitle.textContent += ` | 目标目录不存在或为空，将执行首次部署${dep?.service_install_mode === "windows_service" ? "并尝试创建原生 Windows 服务" : dep?.service_install_mode === "nssm" ? "并尝试通过 NSSM 创建服务" : ""}`;
+      changesDialogSubtitle.textContent += " | 首次部署不会应用文件忽略规则";
+      if (!initialDeployAllowed) {
+        changesDialogSubtitle.textContent += " | 当前程序未开启首次部署，正式部署会失败";
+      }
+    } else if (dep?.requires_initial_clear_confirm) {
+      changesDialogSubtitle.textContent += " | 风险提示: 目标目录已有内容，确认后将先清空该目录，再执行首次部署";
+    } else if (hasDeleteRisk) {
+      changesDialogSubtitle.textContent += ` | 风险提示: 确认部署后将删除目标目录中 ${summary.deleted} 个不在压缩包内的现有文件`;
     }
     changesIgnoreList.innerHTML = "";
     if (changesIgnoredPaths) changesIgnoredPaths.innerHTML = "";
@@ -607,6 +763,7 @@
   function buildUploadFormData() {
     if (!uploadForm) return { ok: false, error: "上传表单不存在" };
     const formData = new FormData(uploadForm);
+    formData.set("deploy_entry", `${formData.get("deploy_entry") || pageMode || "standard"}`.trim().toLowerCase() || "standard");
     const selectedID = `${formData.get("project_id") || activeProjectId || ""}`.trim();
     if (!selectedID) {
       return { ok: false, error: "请选择程序" };
@@ -739,13 +896,50 @@
           pendingUploadPayload = {
             selectedID: prepared.selectedID,
             formData: cloneFormData(prepared.formData),
+            requiresDeletionConfirm: false,
+            deletionConfirmMessage: "",
+            requiresInitialClearConfirm: false,
+            initialClearConfirmMessage: "",
           };
-          if (Number(payload?.summary?.total || 0) === 0) {
+          if (payload?.requires_initial_page) {
+            setPreviewHint(`检测到目标目录为空或不存在。请切换到“首次部署专页”继续，当前页面已禁止确认部署：${initialDeployURL}`);
+            setPreviewConfirmLabel("请前往首次部署专页");
+            setPreviewConfirmEnabled(false);
+          } else if (payload?.requires_initial_clear_confirm) {
+            pendingUploadPayload.requiresInitialClearConfirm = true;
+            pendingUploadPayload.initialClearConfirmMessage = buildInitialClearConfirmMessage(payload);
+            pendingUploadPayload.formData.set("clear_target_before_deploy", "true");
+            setPreviewHint("检测到首次部署目标目录中已存在文件。若继续，系统会先清空该目录中的现有内容，再部署压缩包；此操作不可恢复，请谨慎确认。");
+            setPreviewConfirmLabel("确认清空后首次部署");
+            setPreviewConfirmEnabled(true);
+          } else if (payload?.requires_standard_page) {
+            setPreviewHint(`目标目录已有内容，请返回“常规部署”页面继续：${standardDeployURL}`);
+            setPreviewConfirmLabel("请返回常规部署");
+            setPreviewConfirmEnabled(false);
+          } else if (payload?.initial_deploy && payload?.initial_deploy_allowed === false) {
+            setPreviewHint("检测到目标目录为空或不存在，但当前程序未开启首次部署；若直接确认，部署会失败，请先在程序配置中开启 allow_initial_deploy。");
+            setPreviewConfirmLabel("仍然部署");
+            setPreviewConfirmEnabled(true);
+          } else if (payload?.initial_deploy) {
+            setPreviewHint(
+              `检测到首次部署：本次会跳过备份${payload?.service_install_mode === "windows_service" ? "，并在部署后尝试创建原生 Windows 服务" : payload?.service_install_mode === "nssm" ? "，并在部署后尝试通过 NSSM 创建服务" : ""}。`
+            );
+            setPreviewConfirmLabel("确认部署");
+            setPreviewConfirmEnabled(true);
+          } else if (`${payload?.replace_mode || "full"}`.trim().toLowerCase() === "full" && Number(payload?.summary?.deleted || 0) > 0) {
+            pendingUploadPayload.requiresDeletionConfirm = true;
+            pendingUploadPayload.deletionConfirmMessage = buildDeletionConfirmMessage(payload);
+            setPreviewHint(`检测到本次常规部署会删除 ${payload?.summary?.deleted || 0} 个目标目录中的现有文件。确认后，这些不在压缩包内的文件将被删除，请谨慎操作。`);
+            setPreviewConfirmLabel("确认删除并部署");
+            setPreviewConfirmEnabled(true);
+          } else if (Number(payload?.summary?.total || 0) === 0) {
             setPreviewHint("预演结果无文件变更，建议取消本次部署。");
             setPreviewConfirmLabel("仍然部署");
+            setPreviewConfirmEnabled(true);
           } else {
             setPreviewHint("");
             setPreviewConfirmLabel("确认部署");
+            setPreviewConfirmEnabled(true);
           }
           setPreviewActionsVisible(true);
           openDialog(changesDialog);
@@ -1074,6 +1268,18 @@
         return;
       }
       const payload = pendingUploadPayload;
+      if (payload.requiresInitialClearConfirm) {
+        const ok = window.confirm(payload.initialClearConfirmMessage || "确认清空后再首次部署吗？");
+        if (!ok) {
+          return;
+        }
+      }
+      if (payload.requiresDeletionConfirm) {
+        const ok = window.confirm(payload.deletionConfirmMessage || "确认继续部署吗？");
+        if (!ok) {
+          return;
+        }
+      }
       clearPendingUpload();
       closeDialog(changesDialog);
       executeUpload(cloneFormData(payload.formData), payload.selectedID);
@@ -1099,5 +1305,6 @@
     });
   }
 
-  loadConfig();
+  syncProjectNavigation(getQueryProjectId() || getStoredProjectId());
+  loadConfig(getQueryProjectId() || getStoredProjectId());
 })();

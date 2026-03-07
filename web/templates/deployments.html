@@ -53,6 +53,10 @@
   <td class="px-2 py-2 space-y-1">
     <div>{{changedSummary .Changed}}</div>
     <div class="text-slate-500">替换模式: {{if .ReplaceMode}}{{.ReplaceMode}}{{else}}full{{end}}</div>
+    <div class="text-slate-500">首次部署: {{if .InitialDeploy}}是{{else}}否{{end}}</div>
+    <div class="text-slate-500">备份: {{if .BackupSkipped}}已跳过{{else if .BackupFile}}已生成{{else}}无{{end}}</div>
+    <div class="text-slate-500">服务安装: {{if eq .ServiceInstallMode "windows_service"}}Windows 服务{{else}}无{{end}}</div>
+    <div class="text-slate-500">创建服务: {{if .ServiceCreated}}已创建{{else}}否{{end}}</div>
     <div class="text-slate-500">替换忽略: {{len .ReplaceIgnore}} 条</div>
     <button onclick="window.updaterShowChanges('{{.ID}}')" class="text-xs px-1.5 py-0.5 rounded border border-slate-300 hover:bg-slate-100">查看明细</button>
   </td>
