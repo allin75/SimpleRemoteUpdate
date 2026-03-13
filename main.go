@@ -29,6 +29,10 @@ func main() {
 	if handled {
 		return
 	}
+	if err := ensureProcessElevated(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to elevate process: %v\n", err)
+		os.Exit(1)
+	}
 
 	cfg, err := loadConfig("config.json")
 	if err != nil {

@@ -1,0 +1,20 @@
+﻿新增
+- 支持首次部署专页完整下发压缩包内容，首次部署不再应用文件忽略规则。
+- 支持 nssm 服务安装模式，可用 NSSM 包装普通 Web/控制台程序为 Windows 服务。
+- 支持 nssm_exe_path，可使用相对路径并按服务程序目录解析；未填写时界面默认推荐 nssm.exe。
+- 首次部署专页新增 NSSM 打包提示，提醒将 nssm.exe 一并打包。
+
+修复
+- 修复首次部署与预演链路判定不一致的问题。
+- 修复切换到“首次部署专页”后左侧程序选中项回退到第一项的问题。
+- 优化首次部署与服务安装相关提示文案，降低误操作概率。
+
+影响范围
+- 影响部署运行时：deployment_runtime.go、service_windows.go、main.go。
+- 影响配置/UI：web/static/app.js、web/templates/index.html、README.md。
+- 配置新增系统项：nssm_exe_path；项目级 service_install_mode 现支持 nssm。
+
+回滚说明
+- 如需回滚代码，可回退到上一个提交或上一版 Release。
+- 若已将项目服务安装方式改为 nssm，回滚前请先删除当前 NSSM 创建的服务，再按旧方式重新部署。
+- 本次 Release 未提交 config.json、data/ 等运行时文件，回滚时请按现场配置自行保留或恢复。

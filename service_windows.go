@@ -9,14 +9,102 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+func ensureProcessElevated(args []string) error {
+	isService, err := svc.IsWindowsService()
+	if err == nil && isService {
+		return nil
+	}
+	elevated, err := isCurrentProcessElevated()
+	if err != nil {
+		return err
+	}
+	if elevated {
+		return nil
+	}
+	if err := relaunchElevated(args); err != nil {
+		return err
+	}
+	os.Exit(0)
+	return nil
+}
+
+func isCurrentProcessElevated() (bool, error) {
+	token := windows.GetCurrentProcessToken()
+	return token.IsElevated(), nil
+}
+
+func relaunchElevated(args []string) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	absExePath, err := filepath.Abs(exePath)
+	if err != nil {
+		return err
+	}
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	verbPtr, err := windows.UTF16PtrFromString("runas")
+	if err != nil {
+		return err
+	}
+	filePtr, err := windows.UTF16PtrFromString(absExePath)
+	if err != nil {
+		return err
+	}
+	paramsPtr, err := windows.UTF16PtrFromString(joinWindowsArgs(args))
+	if err != nil {
+		return err
+	}
+	dirPtr, err := windows.UTF16PtrFromString(workingDir)
+	if err != nil {
+		return err
+	}
+	shell32 := windows.NewLazySystemDLL("shell32.dll")
+	shellExecuteW := shell32.NewProc("ShellExecuteW")
+	r, _, callErr := shellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(verbPtr)),
+		uintptr(unsafe.Pointer(filePtr)),
+		uintptr(unsafe.Pointer(paramsPtr)),
+		uintptr(unsafe.Pointer(dirPtr)),
+		uintptr(windows.SW_NORMAL),
+	)
+	if r <= 32 {
+		if r == 5 {
+			return errors.New("用户取消了管理员权限授权")
+		}
+		if callErr != syscall.Errno(0) {
+			return fmt.Errorf("请求管理员权限失败: %w", callErr)
+		}
+		return fmt.Errorf("请求管理员权限失败: ShellExecuteW 返回 %d", r)
+	}
+	return nil
+}
+
+func joinWindowsArgs(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	escaped := make([]string, 0, len(args))
+	for _, arg := range args {
+		escaped = append(escaped, strconv.Quote(arg))
+	}
+	return strings.Join(escaped, " ")
+}
 
 func serviceExists(name string) (bool, error) {
 	m, err := mgr.Connect()

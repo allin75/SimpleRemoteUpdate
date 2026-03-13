@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+func ensureProcessElevated(_ []string) error {
+	return nil
+}
+
 func stopServiceImpl(_ context.Context, _ string, _ time.Duration) error {
 	return errors.New("当前平台不支持 windows 服务控制")
 }

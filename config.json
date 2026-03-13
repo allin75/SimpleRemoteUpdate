@@ -2,14 +2,77 @@
   "listen_addr": ":12333",
   "session_cookie": "updater_session",
   "auth_key_sha256": "f6e0a1e2ac41945a9aa7ff8a8aaa0cebc12a3bcc981a929ad5cf810a090e11ae",
-  "default_project_id": "default",
+  "current_version": "0.0.2",
+  "default_project_id": "project-2",
   "projects": [
     {
       "id": "default",
       "name": "fortest",
       "service_name": "fortest",
-      "target_dir": "E:\\IOTEdge\\Yi.Abp.Net8\\src\\Yi.Abp.Web\\bin\\Debug\\net8.0",
+      "target_dir": "E:\\CompalTest\\SmartAuditForTest",
       "current_version": "1.0.4",
+      "default_replace_mode": "full",
+      "allow_initial_deploy": false,
+      "service_install_mode": "none",
+      "service_exe_path": "",
+      "service_args": null,
+      "service_display_name": "",
+      "service_description": "",
+      "service_start_type": "automatic",
+      "backup_ignore": [
+        "logs/",
+        "temp/",
+        "*.log"
+      ],
+      "replace_ignore": [
+        "logs/",
+        "temp/",
+        "*.log",
+        "appsettings.json"
+      ],
+      "max_upload_mb": 1024
+    },
+    {
+      "id": "project-1",
+      "name": "iotedgevue",
+      "service_name": "",
+      "target_dir": "E:\\IOTEdge\\Yi.RuoYi.Vue3\\dist",
+      "current_version": "0.0.2",
+      "default_replace_mode": "full",
+      "allow_initial_deploy": false,
+      "service_install_mode": "none",
+      "service_exe_path": "",
+      "service_args": null,
+      "service_display_name": "",
+      "service_description": "",
+      "service_start_type": "automatic",
+      "backup_ignore": [
+        "logs/",
+        "temp/",
+        "*.log"
+      ],
+      "replace_ignore": [
+        "logs/",
+        "temp/",
+        "*.log",
+        "appsettings.json"
+      ],
+      "max_upload_mb": 1024
+    },
+    {
+      "id": "project-2",
+      "name": "SmartAudit3",
+      "service_name": "MISESmartAudit",
+      "target_dir": "E:\\CompalTest\\SmartAuditForTest",
+      "current_version": "0.0.2",
+      "default_replace_mode": "full",
+      "allow_initial_deploy": true,
+      "service_install_mode": "nssm",
+      "service_exe_path": "HIKVisionWebNetAsp.exe",
+      "service_args": null,
+      "service_display_name": "MiseSmartAudit",
+      "service_description": "",
+      "service_start_type": "automatic",
       "backup_ignore": [
         "logs/",
         "temp/",
@@ -24,14 +87,18 @@
       "max_upload_mb": 1024
     }
   ],
-  "current_version": "1.0.4",
   "upload_dir": "data/uploads",
   "work_dir": "data/work",
   "backup_dir": "data/backups",
   "deployments_file": "data/deployments.json",
   "log_file": "data/updater.log",
-  "service_name": "fortest",
-  "target_dir": "E:\\IOTEdge\\Yi.Abp.Net8\\src\\Yi.Abp.Web\\bin\\Debug\\net8.0",
+  "nssm_exe_path": "nssm.exe",
+  "self_update_service_name": "",
+  "notify_email": "1416306374@qq.com",
+  "notify_email_auth_code": "totuhqrydedmiiji",
+  "service_name": "MISESmartAudit",
+  "target_dir": "E:\\CompalTest\\SmartAuditForTest",
+  "replace_mode": "full",
   "backup_ignore": [
     "logs/",
     "temp/",
