@@ -8,22 +8,25 @@ import (
 func normalizeProjects(cfg *Config) {
 	if len(cfg.Projects) == 0 {
 		cfg.Projects = []ManagedProject{{
-			ID:                 "default",
-			Name:               firstNonEmpty(strings.TrimSpace(cfg.ServiceName), "默认程序"),
-			ServiceName:        strings.TrimSpace(cfg.ServiceName),
-			TargetDir:          strings.TrimSpace(cfg.TargetDir),
-			CurrentVersion:     firstNonEmpty(strings.TrimSpace(cfg.CurrentVersion), "0.0.1"),
-			DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
-			AllowInitialDeploy: false,
-			ServiceInstallMode: normalizeServiceInstallMode(""),
-			ServiceExePath:     "",
-			ServiceArgs:        nil,
-			ServiceDisplayName: "",
-			ServiceDescription: "",
-			ServiceStartType:   normalizeServiceStartType(""),
-			BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
-			ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
-			MaxUploadMB:        cfg.MaxUploadMB,
+			ID:                  "default",
+			Name:                firstNonEmpty(strings.TrimSpace(cfg.ServiceName), "默认程序"),
+			ServiceName:         strings.TrimSpace(cfg.ServiceName),
+			TargetDir:           strings.TrimSpace(cfg.TargetDir),
+			CurrentVersion:      firstNonEmpty(strings.TrimSpace(cfg.CurrentVersion), "0.0.1"),
+			DefaultReplaceMode:  normalizeReplaceMode(cfg.ReplaceMode),
+			AllowInitialDeploy:  false,
+			ServiceInstallMode:  normalizeServiceInstallMode(""),
+			ServiceExePath:      "",
+			ServiceArgs:         nil,
+			ServiceDisplayName:  "",
+			ServiceDescription:  "",
+			ServiceStartType:    normalizeServiceStartType(""),
+			ReverseProxyEnabled: false,
+			ReverseProxyBindIP:  defaultReverseProxyBindIP(),
+			ReverseProxyRules:   nil,
+			BackupIgnore:        append([]string{}, cfg.BackupIgnore...),
+			ReplaceIgnore:       append([]string{}, cfg.ReplaceIgnore...),
+			MaxUploadMB:         cfg.MaxUploadMB,
 		}}
 	}
 
@@ -54,6 +57,9 @@ func normalizeProjects(cfg *Config) {
 		p.ServiceDisplayName = strings.TrimSpace(p.ServiceDisplayName)
 		p.ServiceDescription = strings.TrimSpace(p.ServiceDescription)
 		p.ServiceStartType = normalizeServiceStartType(p.ServiceStartType)
+		p.ReverseProxyBindIP = normalizeReverseProxyBindIP(p.ReverseProxyBindIP)
+		p.ReverseProxyRules = normalizeReverseProxyRules(p.ReverseProxyRules)
+		applyReverseProxyDefaults(&p)
 		if p.MaxUploadMB <= 0 {
 			p.MaxUploadMB = cfg.MaxUploadMB
 		}
@@ -70,22 +76,25 @@ func normalizeProjects(cfg *Config) {
 	}
 	if len(out) == 0 {
 		out = []ManagedProject{{
-			ID:                 "default",
-			Name:               "默认程序",
-			ServiceName:        strings.TrimSpace(cfg.ServiceName),
-			TargetDir:          strings.TrimSpace(cfg.TargetDir),
-			CurrentVersion:     "0.0.1",
-			DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
-			AllowInitialDeploy: false,
-			ServiceInstallMode: normalizeServiceInstallMode(""),
-			ServiceExePath:     "",
-			ServiceArgs:        nil,
-			ServiceDisplayName: "",
-			ServiceDescription: "",
-			ServiceStartType:   normalizeServiceStartType(""),
-			BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
-			ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
-			MaxUploadMB:        firstInt64(cfg.MaxUploadMB, 1024),
+			ID:                  "default",
+			Name:                "默认程序",
+			ServiceName:         strings.TrimSpace(cfg.ServiceName),
+			TargetDir:           strings.TrimSpace(cfg.TargetDir),
+			CurrentVersion:      "0.0.1",
+			DefaultReplaceMode:  normalizeReplaceMode(cfg.ReplaceMode),
+			AllowInitialDeploy:  false,
+			ServiceInstallMode:  normalizeServiceInstallMode(""),
+			ServiceExePath:      "",
+			ServiceArgs:         nil,
+			ServiceDisplayName:  "",
+			ServiceDescription:  "",
+			ServiceStartType:    normalizeServiceStartType(""),
+			ReverseProxyEnabled: false,
+			ReverseProxyBindIP:  defaultReverseProxyBindIP(),
+			ReverseProxyRules:   nil,
+			BackupIgnore:        append([]string{}, cfg.BackupIgnore...),
+			ReplaceIgnore:       append([]string{}, cfg.ReplaceIgnore...),
+			MaxUploadMB:         firstInt64(cfg.MaxUploadMB, 1024),
 		}}
 	}
 	cfg.Projects = out
@@ -124,22 +133,25 @@ func getDefaultProject(cfg Config) ManagedProject {
 		return cfg.Projects[0]
 	}
 	return ManagedProject{
-		ID:                 "default",
-		Name:               "默认程序",
-		ServiceName:        cfg.ServiceName,
-		TargetDir:          cfg.TargetDir,
-		CurrentVersion:     firstNonEmpty(cfg.CurrentVersion, "0.0.1"),
-		DefaultReplaceMode: normalizeReplaceMode(cfg.ReplaceMode),
-		AllowInitialDeploy: false,
-		ServiceInstallMode: normalizeServiceInstallMode(""),
-		ServiceExePath:     "",
-		ServiceArgs:        nil,
-		ServiceDisplayName: "",
-		ServiceDescription: "",
-		ServiceStartType:   normalizeServiceStartType(""),
-		BackupIgnore:       append([]string{}, cfg.BackupIgnore...),
-		ReplaceIgnore:      append([]string{}, cfg.ReplaceIgnore...),
-		MaxUploadMB:        firstInt64(cfg.MaxUploadMB, 1024),
+		ID:                  "default",
+		Name:                "默认程序",
+		ServiceName:         cfg.ServiceName,
+		TargetDir:           cfg.TargetDir,
+		CurrentVersion:      firstNonEmpty(cfg.CurrentVersion, "0.0.1"),
+		DefaultReplaceMode:  normalizeReplaceMode(cfg.ReplaceMode),
+		AllowInitialDeploy:  false,
+		ServiceInstallMode:  normalizeServiceInstallMode(""),
+		ServiceExePath:      "",
+		ServiceArgs:         nil,
+		ServiceDisplayName:  "",
+		ServiceDescription:  "",
+		ServiceStartType:    normalizeServiceStartType(""),
+		ReverseProxyEnabled: false,
+		ReverseProxyBindIP:  defaultReverseProxyBindIP(),
+		ReverseProxyRules:   nil,
+		BackupIgnore:        append([]string{}, cfg.BackupIgnore...),
+		ReplaceIgnore:       append([]string{}, cfg.ReplaceIgnore...),
+		MaxUploadMB:         firstInt64(cfg.MaxUploadMB, 1024),
 	}
 }
 
@@ -196,6 +208,48 @@ func normalizeServiceArgs(args []string) []string {
 		return nil
 	}
 	return out
+}
+
+func defaultReverseProxyBindIP() string {
+	return "0.0.0.0"
+}
+
+func normalizeReverseProxyBindIP(v string) string {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return defaultReverseProxyBindIP()
+	}
+	return trimmed
+}
+
+func normalizeReverseProxyProtocol(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case ReverseProxyProtocolUDP:
+		return ReverseProxyProtocolUDP
+	default:
+		return ReverseProxyProtocolTCP
+	}
+}
+
+func normalizeReverseProxyRules(rules []ReverseProxyRule) []ReverseProxyRule {
+	out := make([]ReverseProxyRule, 0, len(rules))
+	for _, rule := range rules {
+		rule.Name = strings.TrimSpace(rule.Name)
+		rule.Protocol = normalizeReverseProxyProtocol(rule.Protocol)
+		rule.RemoteHost = strings.TrimSpace(rule.RemoteHost)
+		if rule.ListenPort <= 0 || rule.RemotePort <= 0 || rule.RemoteHost == "" {
+			continue
+		}
+		out = append(out, rule)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func applyReverseProxyDefaults(p *ManagedProject) {
+	_ = p
 }
 
 func firstNonEmpty(v string, fallback string) string {

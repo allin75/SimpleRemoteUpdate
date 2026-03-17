@@ -424,7 +424,6 @@ func (a *App) runRollback(id, sourceID, projectID string) {
 		a.publish(id, "error", "恢复备份失败: %v", err)
 		return
 	}
-
 	if serviceManaged {
 		a.publishProgress(id, "info", "启动服务", 90, "启动服务: %s", dep.ServiceName)
 		if err := startService(dep.ServiceName, 45*time.Second); err != nil {

@@ -30,6 +30,18 @@
   const deleteProjectBtn = document.getElementById("delete-project-btn");
   const projectForm = document.getElementById("project-form");
   const projectMessage = document.getElementById("project-message");
+  const openReverseProxyBtn = document.getElementById("open-reverse-proxy-btn");
+  const restartReverseProxyBtn = document.getElementById("restart-reverse-proxy-btn");
+  const reverseProxyDialog = document.getElementById("reverse-proxy-dialog");
+  const reverseProxyClose = document.getElementById("reverse-proxy-close");
+  const reverseProxySave = document.getElementById("reverse-proxy-save");
+  const reverseProxyMessage = document.getElementById("reverse-proxy-message");
+  const reverseProxySubtitle = document.getElementById("reverse-proxy-subtitle");
+  const reverseProxyEnabled = document.getElementById("reverse-proxy-enabled");
+  const reverseProxyBindIP = document.getElementById("reverse-proxy-bind-ip");
+  const reverseProxyAddRule = document.getElementById("reverse-proxy-add-rule");
+  const reverseProxyRulesBody = document.getElementById("reverse-proxy-rules-body");
+  const reverseProxyEmpty = document.getElementById("reverse-proxy-empty");
 
   const systemForm = document.getElementById("system-form");
   const systemMessage = document.getElementById("system-message");
@@ -65,6 +77,7 @@
   let projectsCache = [];
   let activeProjectId = "";
   let pendingUploadPayload = null;
+  let reverseProxyDraft = [];
 
   function getQueryProjectId() {
     try {
@@ -156,6 +169,10 @@
 
   function setProjectMessage(text) {
     setText(projectMessage, text);
+  }
+
+  function setReverseProxyMessage(text) {
+    setText(reverseProxyMessage, text);
   }
 
   function setCreateMessage(text) {
@@ -322,6 +339,187 @@
     setPreviewConfirmEnabled(true);
   }
 
+  function defaultReverseProxyRule() {
+    return {
+      name: "",
+      protocol: "tcp",
+      listen_port: "",
+      remote_host: "",
+      remote_port: "",
+    };
+  }
+
+  function escapeAttr(value) {
+    return `${value || ""}`
+      .replaceAll("&", "&amp;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+  }
+
+  function buildReverseProxyButtonText(project) {
+    const count = Array.isArray(project?.reverse_proxy_rules) ? project.reverse_proxy_rules.length : 0;
+    if (project?.reverse_proxy_enabled && count > 0) {
+      return `反代配置（已启用 ${count} 条）`;
+    }
+    if (count > 0) {
+      return `反代配置（草稿 ${count} 条）`;
+    }
+    return "反代配置";
+  }
+
+  function updateReverseProxyButton(project) {
+    if (!openReverseProxyBtn) return;
+    openReverseProxyBtn.textContent = buildReverseProxyButtonText(project);
+    if (restartReverseProxyBtn) {
+      restartReverseProxyBtn.disabled = !project?.reverse_proxy_enabled;
+      restartReverseProxyBtn.classList.toggle("opacity-50", !project?.reverse_proxy_enabled);
+      restartReverseProxyBtn.classList.toggle("cursor-not-allowed", !project?.reverse_proxy_enabled);
+    }
+  }
+
+  function getProjectFormReverseProxyState(project) {
+    const enabledInput = projectForm?.elements?.namedItem("reverse_proxy_enabled");
+    const bindInput = projectForm?.elements?.namedItem("reverse_proxy_bind_ip");
+    const rulesInput = projectForm?.elements?.namedItem("reverse_proxy_rules_json");
+    let rules = [];
+    const rawRules = `${rulesInput?.value || ""}`.trim();
+    if (rawRules) {
+      try {
+        const parsed = JSON.parse(rawRules);
+        if (Array.isArray(parsed)) {
+          rules = parsed;
+        }
+      } catch (_err) {}
+    } else if (Array.isArray(project?.reverse_proxy_rules)) {
+      rules = project.reverse_proxy_rules;
+    }
+    const enabledRaw = `${enabledInput?.value || ""}`.trim();
+    return {
+      enabled: enabledRaw ? enabledRaw.toLowerCase() === "true" : Boolean(project?.reverse_proxy_enabled),
+      bindIP: `${bindInput?.value || project?.reverse_proxy_bind_ip || "0.0.0.0"}`.trim() || "0.0.0.0",
+      rules: Array.isArray(rules)
+        ? rules.map((rule) => ({
+            name: `${rule?.name || ""}`.trim(),
+            protocol: `${rule?.protocol || "tcp"}`.trim().toLowerCase() === "udp" ? "udp" : "tcp",
+            listen_port: `${rule?.listen_port || ""}`.trim(),
+            remote_host: `${rule?.remote_host || ""}`.trim(),
+            remote_port: `${rule?.remote_port || ""}`.trim(),
+          }))
+        : [],
+    };
+  }
+
+  function updateReverseProxyEmptyState() {
+    if (!reverseProxyEmpty) return;
+    reverseProxyEmpty.classList.toggle("hidden", reverseProxyDraft.length > 0);
+  }
+
+  function collectReverseProxyRulesFromDOM() {
+    if (!reverseProxyRulesBody) return [];
+    return Array.from(reverseProxyRulesBody.querySelectorAll("[data-rule-row]")).map((row) => ({
+      name: `${row.querySelector('[data-field="name"]')?.value || ""}`.trim(),
+      protocol: `${row.querySelector('[data-field="protocol"]')?.value || "tcp"}`.trim().toLowerCase() === "udp" ? "udp" : "tcp",
+      listen_port: `${row.querySelector('[data-field="listen_port"]')?.value || ""}`.trim(),
+      remote_host: `${row.querySelector('[data-field="remote_host"]')?.value || ""}`.trim(),
+      remote_port: `${row.querySelector('[data-field="remote_port"]')?.value || ""}`.trim(),
+    }));
+  }
+
+  function renderReverseProxyRules() {
+    if (!reverseProxyRulesBody) return;
+    reverseProxyRulesBody.innerHTML = "";
+    reverseProxyDraft.forEach((rule, index) => {
+      const tr = document.createElement("tr");
+      tr.dataset.ruleRow = "true";
+      tr.className = "border-b border-slate-200";
+      tr.innerHTML = `
+        <td class="px-3 py-2"><input data-field="name" value="${escapeAttr(rule.name || "")}" placeholder="可选备注" class="w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs" /></td>
+        <td class="px-3 py-2">
+          <select data-field="protocol" class="w-full rounded border border-slate-300 px-2 py-1 text-xs">
+            <option value="tcp" ${rule.protocol === "udp" ? "" : "selected"}>tcp</option>
+            <option value="udp" ${rule.protocol === "udp" ? "selected" : ""}>udp</option>
+          </select>
+        </td>
+        <td class="px-3 py-2"><input data-field="listen_port" type="number" min="1" max="65535" value="${escapeAttr(rule.listen_port || "")}" class="w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs" /></td>
+        <td class="px-3 py-2"><input data-field="remote_host" value="${escapeAttr(rule.remote_host || "")}" placeholder="例如 192.168.10.20" class="w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs" /></td>
+        <td class="px-3 py-2"><input data-field="remote_port" type="number" min="1" max="65535" value="${escapeAttr(rule.remote_port || "")}" class="w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs" /></td>
+        <td class="px-3 py-2"><button type="button" data-remove-index="${index}" class="rounded border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50">删除</button></td>
+      `;
+      reverseProxyRulesBody.appendChild(tr);
+    });
+    updateReverseProxyEmptyState();
+  }
+
+  function syncReverseProxyDraftFromDOM() {
+    reverseProxyDraft = collectReverseProxyRulesFromDOM();
+  }
+
+  function openReverseProxyEditor(project) {
+    if (!reverseProxyDialog) return;
+    const state = getProjectFormReverseProxyState(project);
+    reverseProxyDraft = state.rules;
+    if (reverseProxySubtitle) {
+      reverseProxySubtitle.textContent = `当前程序: ${project?.name || project?.id || "-"} | 保存后会写回当前程序配置`;
+    }
+    if (reverseProxyEnabled) {
+      reverseProxyEnabled.checked = state.enabled;
+    }
+    if (reverseProxyBindIP) {
+      reverseProxyBindIP.value = state.bindIP;
+    }
+    setReverseProxyMessage("");
+    renderReverseProxyRules();
+    openDialog(reverseProxyDialog);
+  }
+
+  function applyReverseProxyToProjectForm(payload) {
+    if (!projectForm) return;
+    const enabledInput = projectForm.elements.namedItem("reverse_proxy_enabled");
+    const bindInput = projectForm.elements.namedItem("reverse_proxy_bind_ip");
+    const rulesInput = projectForm.elements.namedItem("reverse_proxy_rules_json");
+    if (enabledInput) enabledInput.value = payload.enabled ? "true" : "false";
+    if (bindInput) bindInput.value = payload.bindIP;
+    if (rulesInput) rulesInput.value = JSON.stringify(payload.rules);
+    return { ok: true };
+  }
+
+  function validateReverseProxyDraft() {
+    syncReverseProxyDraftFromDOM();
+    const enabled = Boolean(reverseProxyEnabled?.checked);
+    const bindIP = `${reverseProxyBindIP?.value || ""}`.trim() || "0.0.0.0";
+    const rules = reverseProxyDraft
+      .map((rule) => ({
+        name: `${rule.name || ""}`.trim(),
+        protocol: `${rule.protocol || "tcp"}`.trim().toLowerCase() === "udp" ? "udp" : "tcp",
+        listen_port: Number.parseInt(`${rule.listen_port || ""}`.trim(), 10),
+        remote_host: `${rule.remote_host || ""}`.trim(),
+        remote_port: Number.parseInt(`${rule.remote_port || ""}`.trim(), 10),
+      }))
+      .filter((rule) => rule.remote_host || Number.isFinite(rule.listen_port) || Number.isFinite(rule.remote_port));
+    if (enabled && rules.length === 0) {
+      return { ok: false, error: "启用反代时至少需要一条端口映射规则" };
+    }
+    const seen = new Set();
+    for (const rule of rules) {
+      if (!Number.isInteger(rule.listen_port) || rule.listen_port < 1 || rule.listen_port > 65535) {
+        return { ok: false, error: "本机端口必须是 1-65535 的整数" };
+      }
+      if (!rule.remote_host) {
+        return { ok: false, error: "远端 IP 不能为空" };
+      }
+      if (!Number.isInteger(rule.remote_port) || rule.remote_port < 1 || rule.remote_port > 65535) {
+        return { ok: false, error: "远端端口必须是 1-65535 的整数" };
+      }
+      const key = `${rule.protocol}:${rule.listen_port}`;
+      if (seen.has(key)) {
+        return { ok: false, error: `存在重复监听端口: ${key}` };
+      }
+      seen.add(key);
+    }
+    return { ok: true, enabled, bindIP, rules };
+  }
+
   function getProjectByID(id) {
     const pid = `${id || ""}`.trim();
     if (!pid) return null;
@@ -344,12 +542,15 @@
     const currentVersion = p?.current_version || "-";
     const maxUpload = p?.max_upload_mb || "-";
     const initialMode = p?.allow_initial_deploy ? "允许首次部署" : "仅更新已存在程序";
+    const reverseProxyText = p?.reverse_proxy_enabled
+      ? `反代 ${Array.isArray(p?.reverse_proxy_rules) ? p.reverse_proxy_rules.length : 0} 条`
+      : "反代关闭";
     const installMode = p?.service_install_mode === "windows_service"
       ? "自动安装原生 Windows 服务"
       : p?.service_install_mode === "nssm"
         ? "自动安装 NSSM 服务"
         : "不安装服务";
-    setText(runtimeSummary, `服务: ${serviceName} | 目录: ${targetDir} | 当前版本: ${currentVersion} | ${initialMode} | ${installMode}`);
+    setText(runtimeSummary, `服务: ${serviceName} | 目录: ${targetDir} | 当前版本: ${currentVersion} | ${initialMode} | ${installMode} | ${reverseProxyText}`);
     setText(maxUploadLabel, maxUpload);
     setText(nextVersionLabel, `默认下一版本: ${nextPatchVersion(currentVersion || "0.0.1")}`);
     if (targetVersionInput) {
@@ -416,6 +617,7 @@
         <div class="mt-1 text-xs text-slate-500 break-all">版本: ${p.current_version || "-"} | 服务: ${p.service_name || "-"}</div>
         <div class="mt-1 text-xs text-slate-500 break-all">默认替换: ${p.default_replace_mode === "partial" ? "partial" : "full"}</div>
         <div class="mt-1 text-xs text-slate-500 break-all">首次部署: ${p.allow_initial_deploy ? "允许" : "关闭"} | 服务安装: ${p.service_install_mode === "windows_service" ? "Windows 服务" : p.service_install_mode === "nssm" ? "NSSM" : "无"}</div>
+        <div class="mt-1 text-xs text-slate-500 break-all">反代: ${p.reverse_proxy_enabled ? `已启用 ${Array.isArray(p.reverse_proxy_rules) ? p.reverse_proxy_rules.length : 0} 条` : "关闭"}</div>
       `;
       btn.addEventListener("click", () => selectProject(p.id));
       projectSidebar.appendChild(btn);
@@ -444,6 +646,9 @@
       service_description: project?.service_description || "",
       service_start_type: project?.service_start_type || "automatic",
       service_args_text: Array.isArray(project?.service_args) ? project.service_args.join("\n") : "",
+      reverse_proxy_enabled: project?.reverse_proxy_enabled ? "true" : "false",
+      reverse_proxy_bind_ip: project?.reverse_proxy_bind_ip || "0.0.0.0",
+      reverse_proxy_rules_json: JSON.stringify(Array.isArray(project?.reverse_proxy_rules) ? project.reverse_proxy_rules : []),
       backup_ignore_text: Array.isArray(project?.backup_ignore) ? project.backup_ignore.join("\n") : "",
       replace_ignore_text: Array.isArray(project?.replace_ignore) ? project.replace_ignore.join("\n") : "",
     };
@@ -480,6 +685,7 @@
     }
     const title = project ? `当前程序: ${project.name || project.id} (${project.id})` : "未选择程序";
     setText(activeProjectTitle, title);
+    updateReverseProxyButton(project);
   }
 
   function fillSystemForm(cfg) {
@@ -1143,6 +1349,113 @@
     addProjectBtn.addEventListener("click", () => {
       setCreateMessage("");
       openDialog(projectCreateDialog);
+    });
+  }
+
+  if (openReverseProxyBtn && reverseProxyDialog) {
+    openReverseProxyBtn.addEventListener("click", () => {
+      const project = getActiveProject();
+      if (!project) {
+        setProjectMessage("请先选择程序");
+        return;
+      }
+      openReverseProxyEditor(project);
+    });
+  }
+
+  if (restartReverseProxyBtn) {
+    restartReverseProxyBtn.addEventListener("click", async () => {
+      const project = getActiveProject();
+      if (!project) {
+        setProjectMessage("请先选择程序");
+        return;
+      }
+      if (!project.reverse_proxy_enabled) {
+        setProjectMessage("当前程序未启用反代配置");
+        return;
+      }
+      restartReverseProxyBtn.disabled = true;
+      setProjectMessage("正在重启反代进程...");
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/reverse-proxy/restart`, {
+          method: "POST",
+          credentials: "same-origin",
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setProjectMessage(payload.error || `重启反代进程失败 (${res.status})`);
+          return;
+        }
+        setProjectMessage(payload.message || "反代进程已重启");
+        await loadConfig(project.id, true);
+      } catch (_err) {
+        setProjectMessage("重启反代进程失败");
+      } finally {
+        restartReverseProxyBtn.disabled = false;
+      }
+    });
+  }
+
+  if (reverseProxyAddRule) {
+    reverseProxyAddRule.addEventListener("click", () => {
+      syncReverseProxyDraftFromDOM();
+      reverseProxyDraft.push(defaultReverseProxyRule());
+      renderReverseProxyRules();
+      const lastInput = reverseProxyRulesBody?.querySelector('tr:last-child [data-field="name"]');
+      if (lastInput) lastInput.focus();
+    });
+  }
+
+  if (reverseProxyRulesBody) {
+    reverseProxyRulesBody.addEventListener("click", (e) => {
+      const btn = e.target instanceof HTMLElement ? e.target.closest("[data-remove-index]") : null;
+      if (!btn) return;
+      const idx = Number.parseInt(`${btn.getAttribute("data-remove-index") || ""}`, 10);
+      if (!Number.isInteger(idx) || idx < 0) return;
+      syncReverseProxyDraftFromDOM();
+      reverseProxyDraft.splice(idx, 1);
+      renderReverseProxyRules();
+    });
+  }
+
+  if (reverseProxySave) {
+    reverseProxySave.addEventListener("click", () => {
+      const result = validateReverseProxyDraft();
+      if (!result.ok) {
+        setReverseProxyMessage(result.error || "反代配置不正确");
+        return;
+      }
+      const applied = applyReverseProxyToProjectForm(result);
+      if (!applied?.ok) {
+        setReverseProxyMessage(applied?.error || "写回当前程序失败");
+        return;
+      }
+      const project = getActiveProject();
+      updateReverseProxyButton({
+        ...project,
+        reverse_proxy_enabled: result.enabled,
+        reverse_proxy_rules: result.rules,
+      });
+      setReverseProxyMessage(`已写回当前程序，共 ${result.rules.length} 条规则`);
+      closeDialog(reverseProxyDialog);
+      setProjectMessage(`反代配置已写回当前程序，请继续点击“保存当前程序配置”使其生效`);
+    });
+  }
+
+  if (reverseProxyClose && reverseProxyDialog) {
+    reverseProxyClose.addEventListener("click", () => {
+      closeDialog(reverseProxyDialog);
+    });
+    reverseProxyDialog.addEventListener("click", (e) => {
+      const rect = reverseProxyDialog.getBoundingClientRect();
+      const inDialog =
+        rect.top <= e.clientY &&
+        e.clientY <= rect.top + rect.height &&
+        rect.left <= e.clientX &&
+        e.clientX <= rect.left + rect.width;
+      if (!inDialog) {
+        closeDialog(reverseProxyDialog);
+      }
     });
   }
 

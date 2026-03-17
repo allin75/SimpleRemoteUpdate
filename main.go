@@ -14,14 +14,26 @@ import (
 	"net/mail"
 	"net/smtp"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 func main() {
-	handled, err := tryRunSelfUpdateWorker(os.Args[1:])
+	handled, err := tryRunReverseProxyWorker(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reverse proxy worker failed: %v\n", err)
+		os.Exit(1)
+	}
+	if handled {
+		return
+	}
+
+	handled, err = tryRunSelfUpdateWorker(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "self-update worker failed: %v\n", err)
 		os.Exit(1)
@@ -72,19 +84,22 @@ func main() {
 	}
 
 	app := &App{
-		cfg:         cfg,
-		cfgPath:     "config.json",
-		logWriter:   logWriter,
-		logger:      logger,
-		templates:   tmpl,
-		store:       store,
-		sessions:    newSessionManager(),
-		events:      newEventHub(),
-		static:      http.FileServer(http.FS(staticFS)),
-		projectTask: make(map[string]struct{}),
-		schedCancel: make(map[string]func()),
+		cfg:                 cfg,
+		cfgPath:             "config.json",
+		logWriter:           logWriter,
+		logger:              logger,
+		templates:           tmpl,
+		store:               store,
+		sessions:            newSessionManager(),
+		events:              newEventHub(),
+		static:              http.FileServer(http.FS(staticFS)),
+		projectTask:         make(map[string]struct{}),
+		schedCancel:         make(map[string]func()),
+		reverseProxyWorkers: make(map[string]*reverseProxyProcess),
 	}
 	app.resumeScheduledDeployments()
+	app.bootstrapReverseProxyServices()
+	defer app.stopAllReverseProxyProcesses()
 
 	logger.Info("updater server started",
 		"addr", cfg.ListenAddr,
@@ -997,9 +1012,15 @@ func (a *App) handleSaveSystemConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	finalCfg := a.currentConfig()
+	message := "系统配置保存成功，已自动刷新运行配置"
+	if proxyMsg, proxyErr := a.syncReverseProxyProcesses(finalCfg, true); proxyErr != nil {
+		message += fmt.Sprintf("；反代进程同步失败: %v", proxyErr)
+	} else if proxyMsg != "" {
+		message += "；" + proxyMsg
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":             true,
-		"message":        "系统配置保存成功，已自动刷新运行配置",
+		"message":        message,
 		"restart_needed": len(restartFields) > 0,
 		"restart_fields": restartFields,
 		"config":         configSnapshot(finalCfg),
@@ -1040,6 +1061,14 @@ func (a *App) handleSaveProjectConfig(w http.ResponseWriter, r *http.Request) {
 	project.ServiceDisplayName = strings.TrimSpace(r.FormValue("service_display_name"))
 	project.ServiceDescription = strings.TrimSpace(r.FormValue("service_description"))
 	project.ServiceStartType = normalizeServiceStartType(r.FormValue("service_start_type"))
+	project.ReverseProxyEnabled = parseBoolFormValue(r.FormValue("reverse_proxy_enabled"))
+	project.ReverseProxyBindIP = normalizeReverseProxyBindIP(r.FormValue("reverse_proxy_bind_ip"))
+	proxyRules, parseErr := parseReverseProxyRulesFormValue(r.FormValue("reverse_proxy_rules_json"))
+	if parseErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": parseErr.Error()})
+		return
+	}
+	project.ReverseProxyRules = proxyRules
 	if project.CurrentVersion == "" {
 		project.CurrentVersion = "0.0.1"
 	}
@@ -1077,6 +1106,11 @@ func (a *App) handleSaveProjectConfig(w http.ResponseWriter, r *http.Request) {
 	saveMsg := fmt.Sprintf("程序 %s 配置保存成功，已自动刷新运行配置", project.Name)
 	if project.ServiceName == "" {
 		saveMsg += "；提示：service_name 为空，部署/回滚时将跳过服务启停，仅执行文件替换"
+	}
+	if proxyMsg, proxyErr := a.syncReverseProxyProcesses(finalCfg, true); proxyErr != nil {
+		saveMsg += fmt.Sprintf("；反代进程同步失败: %v", proxyErr)
+	} else if proxyMsg != "" {
+		saveMsg += "；" + proxyMsg
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                true,
@@ -1125,23 +1159,31 @@ func (a *App) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := ManagedProject{
-		ID:                 projectID,
-		Name:               firstNonEmpty(strings.TrimSpace(r.FormValue("name")), projectID),
-		ServiceName:        strings.TrimSpace(r.FormValue("service_name")),
-		TargetDir:          strings.TrimSpace(r.FormValue("target_dir")),
-		CurrentVersion:     normalizeVersion(r.FormValue("current_version")),
-		DefaultReplaceMode: normalizeReplaceMode(r.FormValue("default_replace_mode")),
-		AllowInitialDeploy: parseBoolFormValue(r.FormValue("allow_initial_deploy")),
-		ServiceInstallMode: normalizeServiceInstallMode(r.FormValue("service_install_mode")),
-		ServiceExePath:     strings.TrimSpace(r.FormValue("service_exe_path")),
-		ServiceArgs:        splitLinesTrim(r.FormValue("service_args_text")),
-		ServiceDisplayName: strings.TrimSpace(r.FormValue("service_display_name")),
-		ServiceDescription: strings.TrimSpace(r.FormValue("service_description")),
-		ServiceStartType:   normalizeServiceStartType(r.FormValue("service_start_type")),
-		MaxUploadMB:        maxUploadMB,
-		BackupIgnore:       splitLinesTrim(r.FormValue("backup_ignore_text")),
-		ReplaceIgnore:      splitLinesTrim(r.FormValue("replace_ignore_text")),
+		ID:                  projectID,
+		Name:                firstNonEmpty(strings.TrimSpace(r.FormValue("name")), projectID),
+		ServiceName:         strings.TrimSpace(r.FormValue("service_name")),
+		TargetDir:           strings.TrimSpace(r.FormValue("target_dir")),
+		CurrentVersion:      normalizeVersion(r.FormValue("current_version")),
+		DefaultReplaceMode:  normalizeReplaceMode(r.FormValue("default_replace_mode")),
+		AllowInitialDeploy:  parseBoolFormValue(r.FormValue("allow_initial_deploy")),
+		ServiceInstallMode:  normalizeServiceInstallMode(r.FormValue("service_install_mode")),
+		ServiceExePath:      strings.TrimSpace(r.FormValue("service_exe_path")),
+		ServiceArgs:         splitLinesTrim(r.FormValue("service_args_text")),
+		ServiceDisplayName:  strings.TrimSpace(r.FormValue("service_display_name")),
+		ServiceDescription:  strings.TrimSpace(r.FormValue("service_description")),
+		ServiceStartType:    normalizeServiceStartType(r.FormValue("service_start_type")),
+		ReverseProxyEnabled: parseBoolFormValue(r.FormValue("reverse_proxy_enabled")),
+		ReverseProxyBindIP:  normalizeReverseProxyBindIP(r.FormValue("reverse_proxy_bind_ip")),
+		MaxUploadMB:         maxUploadMB,
+		BackupIgnore:        splitLinesTrim(r.FormValue("backup_ignore_text")),
+		ReplaceIgnore:       splitLinesTrim(r.FormValue("replace_ignore_text")),
 	}
+	proxyRules, parseErr := parseReverseProxyRulesFormValue(r.FormValue("reverse_proxy_rules_json"))
+	if parseErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": parseErr.Error()})
+		return
+	}
+	project.ReverseProxyRules = proxyRules
 	if project.CurrentVersion == "" {
 		project.CurrentVersion = "0.0.1"
 	}
@@ -1181,6 +1223,11 @@ func (a *App) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
 	if project.ServiceName == "" {
 		createMsg += "；提示：service_name 为空，部署/回滚时将跳过服务启停，仅执行文件替换"
 	}
+	if proxyMsg, proxyErr := a.syncReverseProxyProcesses(finalCfg, true); proxyErr != nil {
+		createMsg += fmt.Sprintf("；反代进程同步失败: %v", proxyErr)
+	} else if proxyMsg != "" {
+		createMsg += "；" + proxyMsg
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                true,
 		"message":           createMsg,
@@ -1192,11 +1239,21 @@ func (a *App) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleProjectItemAPI(w http.ResponseWriter, r *http.Request) {
-	projectID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/projects/"))
-	if projectID == "" || strings.Contains(projectID, "/") {
+	rest := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/projects/"))
+	if rest == "" {
 		http.NotFound(w, r)
 		return
 	}
+	segments := strings.Split(rest, "/")
+	if len(segments) == 3 && segments[1] == "reverse-proxy" && segments[2] == "restart" {
+		a.handleProjectReverseProxyRestartAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	projectID := strings.TrimSpace(segments[0])
 	if r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1233,13 +1290,45 @@ func (a *App) handleProjectItemAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	finalCfg := a.currentConfig()
+	message := fmt.Sprintf("程序 %s 已删除", projectID)
+	if proxyMsg, proxyErr := a.syncReverseProxyProcesses(finalCfg, true); proxyErr != nil {
+		message += fmt.Sprintf("；反代进程同步失败: %v", proxyErr)
+	} else if proxyMsg != "" {
+		message += "；" + proxyMsg
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                true,
-		"message":           fmt.Sprintf("程序 %s 已删除", projectID),
+		"message":           message,
 		"restart_needed":    len(restartFields) > 0,
 		"restart_fields":    restartFields,
 		"active_project_id": finalCfg.DefaultProjectID,
 		"config":            configSnapshot(finalCfg),
+	})
+}
+
+func (a *App) handleProjectReverseProxyRestartAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := a.currentConfig()
+	project, ok := findProjectByID(cfg.Projects, projectID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	if !shouldRunReverseProxyProject(project) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "当前程序未启用有效的反代配置"})
+		return
+	}
+	msg, err := a.ensureReverseProxyProcess(project, true)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": firstNonEmpty(msg, "反代子进程已重启"),
 	})
 }
 
@@ -1281,6 +1370,9 @@ func configSnapshot(cfg Config) map[string]any {
 		"service_display_name":       dp.ServiceDisplayName,
 		"service_description":        dp.ServiceDescription,
 		"service_start_type":         dp.ServiceStartType,
+		"reverse_proxy_enabled":      dp.ReverseProxyEnabled,
+		"reverse_proxy_bind_ip":      dp.ReverseProxyBindIP,
+		"reverse_proxy_rules":        dp.ReverseProxyRules,
 		"backup_ignore_text":         strings.Join(dp.BackupIgnore, "\n"),
 		"replace_ignore_text":        strings.Join(dp.ReplaceIgnore, "\n"),
 		"max_upload_mb":              dp.MaxUploadMB,
@@ -1751,6 +1843,32 @@ func validateRuntimeConfig(cfg Config) error {
 		if p.MaxUploadMB <= 0 {
 			return fmt.Errorf("projects(%s).max_upload_mb 必须大于 0", p.ID)
 		}
+		if p.ReverseProxyEnabled {
+			if len(p.ReverseProxyRules) == 0 {
+				return fmt.Errorf("projects(%s).reverse_proxy_rules 不能为空（启用反代后至少配置一条规则）", p.ID)
+			}
+			if strings.TrimSpace(p.ReverseProxyBindIP) == "" {
+				return fmt.Errorf("projects(%s).reverse_proxy_bind_ip 不能为空", p.ID)
+			}
+			listenPorts := make(map[string]struct{}, len(p.ReverseProxyRules))
+			for idx, rule := range p.ReverseProxyRules {
+				if rule.ListenPort <= 0 || rule.ListenPort > 65535 {
+					return fmt.Errorf("projects(%s).reverse_proxy_rules[%d].listen_port 非法: %d", p.ID, idx, rule.ListenPort)
+				}
+				if rule.RemotePort <= 0 || rule.RemotePort > 65535 {
+					return fmt.Errorf("projects(%s).reverse_proxy_rules[%d].remote_port 非法: %d", p.ID, idx, rule.RemotePort)
+				}
+				if strings.TrimSpace(rule.RemoteHost) == "" {
+					return fmt.Errorf("projects(%s).reverse_proxy_rules[%d].remote_host 不能为空", p.ID, idx)
+				}
+				protocol := normalizeReverseProxyProtocol(rule.Protocol)
+				key := fmt.Sprintf("%s:%d", protocol, rule.ListenPort)
+				if _, exists := listenPorts[key]; exists {
+					return fmt.Errorf("projects(%s).reverse_proxy_rules 存在重复监听端口: %s", p.ID, key)
+				}
+				listenPorts[key] = struct{}{}
+			}
+		}
 		if p.ServiceInstallMode != ServiceInstallModeNone {
 			if strings.TrimSpace(p.ServiceName) == "" {
 				return fmt.Errorf("projects(%s).service_name 不能为空（启用服务安装时必填）", p.ID)
@@ -1845,6 +1963,243 @@ func (a *App) setProjectCurrentVersion(projectID, version string) error {
 	return nil
 }
 
+func (a *App) bootstrapReverseProxyServices() {
+	cfg := a.currentConfig()
+	if msg, err := a.syncReverseProxyProcesses(cfg, false); err != nil {
+		a.logger.Warn("bootstrap reverse proxy process failed", "message", msg, "error", err)
+	} else if msg != "" {
+		a.logger.Info("bootstrap reverse proxy process synced", "message", msg)
+	}
+}
+
+func shouldRunReverseProxyProject(project ManagedProject) bool {
+	return project.ReverseProxyEnabled && len(project.ReverseProxyRules) > 0
+}
+
+func reverseProxyProjectSignature(project ManagedProject) string {
+	raw, _ := json.Marshal(struct {
+		BindIP string             `json:"bind_ip"`
+		Rules  []ReverseProxyRule `json:"rules"`
+	}{
+		BindIP: normalizeReverseProxyBindIP(project.ReverseProxyBindIP),
+		Rules:  normalizeReverseProxyRules(project.ReverseProxyRules),
+	})
+	return string(raw)
+}
+
+func isLegacyReverseProxyServiceProject(project ManagedProject) bool {
+	if strings.EqualFold(strings.TrimSpace(filepath.Base(project.ServiceExePath)), "gost.exe") {
+		return true
+	}
+	for _, arg := range project.ServiceArgs {
+		if strings.EqualFold(strings.TrimSpace(arg), "gost.generated.yaml") {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) ensureReverseProxyProcess(project ManagedProject, forceRestart bool) (string, error) {
+	if !shouldRunReverseProxyProject(project) {
+		return "", nil
+	}
+	signature := reverseProxyProjectSignature(project)
+
+	a.reverseProxyMu.Lock()
+	defer a.reverseProxyMu.Unlock()
+
+	worker, exists := a.reverseProxyWorkers[project.ID]
+	if exists && !forceRestart && worker.signature == signature {
+		return "反代子进程已在运行", nil
+	}
+	if exists {
+		if err := a.stopReverseProxyProcessLocked(project.ID); err != nil {
+			return "", fmt.Errorf("停止反代子进程失败: %w", err)
+		}
+	}
+	if err := a.startReverseProxyProcessLocked(project, signature); err != nil {
+		return "", fmt.Errorf("启动反代子进程失败: %w", err)
+	}
+	if exists {
+		return "反代子进程已重启并应用新配置", nil
+	}
+	return "反代子进程已启动", nil
+}
+
+func (a *App) syncReverseProxyProcesses(cfg Config, forceRestart bool) (string, error) {
+	a.reverseProxyMu.Lock()
+	defer a.reverseProxyMu.Unlock()
+
+	desired := make(map[string]ManagedProject)
+	for _, project := range cfg.Projects {
+		if shouldRunReverseProxyProject(project) {
+			desired[project.ID] = project
+		}
+	}
+
+	started := 0
+	restarted := 0
+	stopped := 0
+	var errs []string
+
+	for projectID := range a.reverseProxyWorkers {
+		if _, ok := desired[projectID]; ok {
+			continue
+		}
+		if err := a.stopReverseProxyProcessLocked(projectID); err != nil {
+			errs = append(errs, fmt.Sprintf("%s 停止失败: %v", projectID, err))
+			continue
+		}
+		stopped++
+	}
+
+	for _, project := range cfg.Projects {
+		if !shouldRunReverseProxyProject(project) {
+			continue
+		}
+		signature := reverseProxyProjectSignature(project)
+		worker, exists := a.reverseProxyWorkers[project.ID]
+		if exists && !forceRestart && worker.signature == signature {
+			continue
+		}
+		if exists {
+			if err := a.stopReverseProxyProcessLocked(project.ID); err != nil {
+				errs = append(errs, fmt.Sprintf("%s 重启前停止失败: %v", project.ID, err))
+				continue
+			}
+		}
+		if err := a.startReverseProxyProcessLocked(project, signature); err != nil {
+			errs = append(errs, fmt.Sprintf("%s 启动失败: %v", project.ID, err))
+			continue
+		}
+		if exists {
+			restarted++
+		} else {
+			started++
+		}
+	}
+
+	parts := make([]string, 0, 3)
+	if started > 0 {
+		parts = append(parts, fmt.Sprintf("已启动 %d 个反代子进程", started))
+	}
+	if restarted > 0 {
+		parts = append(parts, fmt.Sprintf("已重启 %d 个反代子进程", restarted))
+	}
+	if stopped > 0 {
+		parts = append(parts, fmt.Sprintf("已停止 %d 个反代子进程", stopped))
+	}
+	message := strings.Join(parts, "；")
+	if len(errs) > 0 {
+		return message, errors.New(strings.Join(errs, "；"))
+	}
+	return message, nil
+}
+
+func (a *App) stopAllReverseProxyProcesses() {
+	a.reverseProxyMu.Lock()
+	defer a.reverseProxyMu.Unlock()
+
+	for projectID := range a.reverseProxyWorkers {
+		if err := a.stopReverseProxyProcessLocked(projectID); err != nil {
+			a.logger.Warn("stop reverse proxy process failed", "project_id", projectID, "error", err)
+		}
+	}
+}
+
+func (a *App) startReverseProxyProcessLocked(project ManagedProject, signature string) error {
+	if isLegacyReverseProxyServiceProject(project) && strings.TrimSpace(project.ServiceName) != "" {
+		exists, err := serviceExists(project.ServiceName)
+		if err != nil {
+			return fmt.Errorf("检查旧版反代服务失败: %w", err)
+		}
+		if exists {
+			if err := stopService(project.ServiceName, 15*time.Second); err != nil {
+				return fmt.Errorf("停止旧版反代服务失败: %w", err)
+			}
+		}
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("读取当前程序路径失败: %w", err)
+	}
+	configPath, err := filepath.Abs(a.cfgPath)
+	if err != nil {
+		return fmt.Errorf("解析配置文件路径失败: %w", err)
+	}
+	configDir := filepath.Dir(configPath)
+
+	args := []string{"--reverse-proxy-worker", "--config", configPath, "--project-id", project.ID}
+	cmd := exec.Command(exePath, args...)
+	cmd.Dir = configDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = selfUpdateWorkerSysProcAttr()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	exitCh := make(chan error, 1)
+	go func() {
+		exitCh <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-exitCh:
+		if err != nil {
+			return err
+		}
+		return errors.New("反代子进程启动后立即退出")
+	case <-time.After(700 * time.Millisecond):
+	}
+
+	a.reverseProxyWorkers[project.ID] = &reverseProxyProcess{
+		cmd:       cmd,
+		signature: signature,
+	}
+	go a.observeReverseProxyProcess(project.ID, cmd, exitCh)
+	a.logger.Info("reverse proxy worker started", "project_id", project.ID, "pid", cmd.Process.Pid)
+	return nil
+}
+
+func (a *App) observeReverseProxyProcess(projectID string, cmd *exec.Cmd, exitCh <-chan error) {
+	err := <-exitCh
+
+	a.reverseProxyMu.Lock()
+	managedStop := true
+	if worker, ok := a.reverseProxyWorkers[projectID]; ok && worker.cmd == cmd {
+		delete(a.reverseProxyWorkers, projectID)
+		managedStop = false
+	}
+	a.reverseProxyMu.Unlock()
+
+	if managedStop {
+		a.logger.Info("reverse proxy worker stopped by manager", "project_id", projectID)
+		return
+	}
+	if err != nil && !errors.Is(err, os.ErrProcessDone) {
+		a.logger.Warn("reverse proxy worker exited", "project_id", projectID, "error", err)
+		return
+	}
+	a.logger.Info("reverse proxy worker exited", "project_id", projectID)
+}
+
+func (a *App) stopReverseProxyProcessLocked(projectID string) error {
+	worker, ok := a.reverseProxyWorkers[projectID]
+	if !ok {
+		return nil
+	}
+	delete(a.reverseProxyWorkers, projectID)
+	if worker.cmd == nil || worker.cmd.Process == nil {
+		return nil
+	}
+	if err := worker.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
+}
+
 func splitLinesTrim(raw string) []string {
 	lines := strings.Split(raw, "\n")
 	out := make([]string, 0, len(lines))
@@ -1856,6 +2211,18 @@ func splitLinesTrim(raw string) []string {
 		out = append(out, line)
 	}
 	return out
+}
+
+func parseReverseProxyRulesFormValue(raw string) ([]ReverseProxyRule, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var rules []ReverseProxyRule
+	if err := json.Unmarshal([]byte(trimmed), &rules); err != nil {
+		return nil, fmt.Errorf("reverse_proxy_rules_json 格式错误: %v", err)
+	}
+	return normalizeReverseProxyRules(rules), nil
 }
 
 func maxProjectUploadBytes(cfg Config) int64 {
@@ -1922,6 +2289,16 @@ func parsePageArgs(r *http.Request, defaultOffset, defaultLimit, maxLimit int) (
 	return offset, limit
 }
 
+type reverseProxyWorkerOptions struct {
+	ConfigPath string
+	ProjectID  string
+}
+
+type udpReverseProxySession struct {
+	backend *net.UDPConn
+	client  *net.UDPAddr
+}
+
 type selfUpdateWorkerOptions struct {
 	TargetPath      string
 	SourcePath      string
@@ -1931,6 +2308,346 @@ type selfUpdateWorkerOptions struct {
 	LogFile         string
 	ServiceName     string
 	WaitSeconds     int
+}
+
+func tryRunReverseProxyWorker(args []string) (bool, error) {
+	if len(args) == 0 || strings.TrimSpace(args[0]) != "--reverse-proxy-worker" {
+		return false, nil
+	}
+
+	fs := flag.NewFlagSet("reverse-proxy-worker", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	opts := reverseProxyWorkerOptions{}
+	fs.StringVar(&opts.ConfigPath, "config", "", "config file path")
+	fs.StringVar(&opts.ProjectID, "project-id", "", "project id")
+	if err := fs.Parse(args[1:]); err != nil {
+		return true, err
+	}
+	return true, runReverseProxyWorker(opts)
+}
+
+func runReverseProxyWorker(opts reverseProxyWorkerOptions) error {
+	opts.ConfigPath = strings.TrimSpace(opts.ConfigPath)
+	opts.ProjectID = strings.TrimSpace(opts.ProjectID)
+	if opts.ConfigPath == "" || opts.ProjectID == "" {
+		return errors.New("missing required args: --config --project-id")
+	}
+
+	configPath, err := filepath.Abs(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
+	configDir := filepath.Dir(configPath)
+	if err := os.Chdir(configDir); err != nil {
+		return err
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	project, ok := findProjectByID(cfg.Projects, opts.ProjectID)
+	if !ok {
+		return fmt.Errorf("program not found: %s", opts.ProjectID)
+	}
+	if !shouldRunReverseProxyProject(project) {
+		return fmt.Errorf("program %s does not have reverse proxy enabled", opts.ProjectID)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if logWriter, logErr := newDynamicLogWriter(cfg.LogFile); logErr == nil {
+		defer logWriter.Close()
+		logger = slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+
+	logger.Info("reverse proxy worker starting",
+		"project_id", project.ID,
+		"bind_ip", normalizeReverseProxyBindIP(project.ReverseProxyBindIP),
+		"rules", len(project.ReverseProxyRules),
+	)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	err = runManagedReverseProxy(ctx, logger, project)
+	if err != nil {
+		logger.Error("reverse proxy worker stopped with error", "project_id", project.ID, "error", err)
+		return err
+	}
+	logger.Info("reverse proxy worker stopped", "project_id", project.ID)
+	return nil
+}
+
+func runManagedReverseProxy(ctx context.Context, logger *slog.Logger, project ManagedProject) error {
+	bindIP := normalizeReverseProxyBindIP(project.ReverseProxyBindIP)
+	closers := make([]io.Closer, 0, len(project.ReverseProxyRules))
+	errCh := make(chan error, len(project.ReverseProxyRules))
+
+	for _, rule := range project.ReverseProxyRules {
+		var (
+			closer io.Closer
+			err    error
+		)
+		switch normalizeReverseProxyProtocol(rule.Protocol) {
+		case ReverseProxyProtocolUDP:
+			closer, err = startManagedUDPProxy(ctx, logger, project, bindIP, rule, errCh)
+		default:
+			closer, err = startManagedTCPProxy(ctx, logger, project, bindIP, rule, errCh)
+		}
+		if err != nil {
+			for _, c := range closers {
+				_ = c.Close()
+			}
+			return err
+		}
+		closers = append(closers, closer)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		for _, c := range closers {
+			_ = c.Close()
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case err := <-errCh:
+		for _, c := range closers {
+			_ = c.Close()
+		}
+		return err
+	}
+}
+
+func startManagedTCPProxy(ctx context.Context, logger *slog.Logger, project ManagedProject, bindIP string, rule ReverseProxyRule, errCh chan<- error) (io.Closer, error) {
+	listenAddr := reverseProxyListenAddress(bindIP, rule.ListenPort)
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("项目 %s TCP 监听失败(%s): %w", project.ID, listenAddr, err)
+	}
+	remoteAddr := reverseProxyRemoteAddress(rule)
+	logger.Info("reverse proxy tcp listening",
+		"project_id", project.ID,
+		"listen", listenAddr,
+		"remote", remoteAddr,
+	)
+
+	go func() {
+		for {
+			clientConn, err := listener.Accept()
+			if err != nil {
+				if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+					return
+				}
+				select {
+				case errCh <- fmt.Errorf("项目 %s TCP accept 失败(%s): %w", project.ID, listenAddr, err):
+				default:
+				}
+				return
+			}
+			go handleManagedTCPConn(ctx, logger, project, rule, clientConn)
+		}
+	}()
+	return listener, nil
+}
+
+func handleManagedTCPConn(ctx context.Context, logger *slog.Logger, project ManagedProject, rule ReverseProxyRule, clientConn net.Conn) {
+	defer clientConn.Close()
+
+	remoteAddr := reverseProxyRemoteAddress(rule)
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	remoteConn, err := dialer.DialContext(ctx, "tcp", remoteAddr)
+	if err != nil {
+		logger.Warn("reverse proxy tcp dial failed",
+			"project_id", project.ID,
+			"listen_port", rule.ListenPort,
+			"remote", remoteAddr,
+			"error", err,
+		)
+		return
+	}
+	defer remoteConn.Close()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(remoteConn, clientConn)
+		closeWrite(remoteConn)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(clientConn, remoteConn)
+		closeWrite(clientConn)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+}
+
+func startManagedUDPProxy(ctx context.Context, logger *slog.Logger, project ManagedProject, bindIP string, rule ReverseProxyRule, errCh chan<- error) (io.Closer, error) {
+	listenAddr, err := net.ResolveUDPAddr("udp", reverseProxyListenAddress(bindIP, rule.ListenPort))
+	if err != nil {
+		return nil, fmt.Errorf("项目 %s UDP 监听地址非法: %w", project.ID, err)
+	}
+	listener, err := net.ListenUDP("udp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("项目 %s UDP 监听失败(%s): %w", project.ID, listenAddr.String(), err)
+	}
+	remoteAddr, err := net.ResolveUDPAddr("udp", reverseProxyRemoteAddress(rule))
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("项目 %s UDP 远端地址非法: %w", project.ID, err)
+	}
+	logger.Info("reverse proxy udp listening",
+		"project_id", project.ID,
+		"listen", listenAddr.String(),
+		"remote", remoteAddr.String(),
+	)
+
+	go serveManagedUDPProxy(ctx, logger, project, rule, listener, remoteAddr, errCh)
+	return listener, nil
+}
+
+func serveManagedUDPProxy(ctx context.Context, logger *slog.Logger, project ManagedProject, rule ReverseProxyRule, listener *net.UDPConn, remoteAddr *net.UDPAddr, errCh chan<- error) {
+	sessions := make(map[string]*udpReverseProxySession)
+	var mu sync.Mutex
+	buf := make([]byte, 64*1024)
+
+	for {
+		_ = listener.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, clientAddr, err := listener.ReadFromUDP(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				if ctx.Err() != nil {
+					return
+				}
+				continue
+			}
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			select {
+			case errCh <- fmt.Errorf("项目 %s UDP 读取失败(%d): %w", project.ID, rule.ListenPort, err):
+			default:
+			}
+			return
+		}
+
+		key := clientAddr.String()
+		session, err := ensureUDPProxySession(ctx, logger, project, rule, listener, remoteAddr, clientAddr, key, &mu, sessions)
+		if err != nil {
+			logger.Warn("reverse proxy udp dial failed",
+				"project_id", project.ID,
+				"listen_port", rule.ListenPort,
+				"remote", remoteAddr.String(),
+				"error", err,
+			)
+			continue
+		}
+		_ = session.backend.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if _, err := session.backend.Write(buf[:n]); err != nil {
+			logger.Warn("reverse proxy udp forward failed",
+				"project_id", project.ID,
+				"client", clientAddr.String(),
+				"error", err,
+			)
+			closeUDPProxySession(key, session, &mu, sessions)
+		}
+	}
+}
+
+func ensureUDPProxySession(ctx context.Context, logger *slog.Logger, project ManagedProject, rule ReverseProxyRule, listener *net.UDPConn, remoteAddr *net.UDPAddr, clientAddr *net.UDPAddr, key string, mu *sync.Mutex, sessions map[string]*udpReverseProxySession) (*udpReverseProxySession, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if session, ok := sessions[key]; ok {
+		return session, nil
+	}
+	backend, err := net.DialUDP("udp", nil, remoteAddr)
+	if err != nil {
+		return nil, err
+	}
+	session := &udpReverseProxySession{
+		backend: backend,
+		client:  clientAddr,
+	}
+	sessions[key] = session
+
+	go relayManagedUDPResponses(ctx, logger, project, rule, listener, key, session, mu, sessions)
+	return session, nil
+}
+
+func relayManagedUDPResponses(ctx context.Context, logger *slog.Logger, project ManagedProject, rule ReverseProxyRule, listener *net.UDPConn, key string, session *udpReverseProxySession, mu *sync.Mutex, sessions map[string]*udpReverseProxySession) {
+	defer closeUDPProxySession(key, session, mu, sessions)
+
+	buf := make([]byte, 64*1024)
+	for {
+		_ = session.backend.SetReadDeadline(time.Now().Add(60 * time.Second))
+		n, err := session.backend.Read(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				return
+			}
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			logger.Warn("reverse proxy udp response failed",
+				"project_id", project.ID,
+				"listen_port", rule.ListenPort,
+				"client", session.client.String(),
+				"error", err,
+			)
+			return
+		}
+		_ = listener.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if _, err := listener.WriteToUDP(buf[:n], session.client); err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			logger.Warn("reverse proxy udp reply failed",
+				"project_id", project.ID,
+				"listen_port", rule.ListenPort,
+				"client", session.client.String(),
+				"error", err,
+			)
+			return
+		}
+	}
+}
+
+func closeUDPProxySession(key string, session *udpReverseProxySession, mu *sync.Mutex, sessions map[string]*udpReverseProxySession) {
+	if session == nil {
+		return
+	}
+	_ = session.backend.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if current, ok := sessions[key]; ok && current == session {
+		delete(sessions, key)
+	}
+}
+
+func reverseProxyListenAddress(bindIP string, port int) string {
+	return net.JoinHostPort(normalizeReverseProxyBindIP(bindIP), strconv.Itoa(port))
+}
+
+func reverseProxyRemoteAddress(rule ReverseProxyRule) string {
+	return net.JoinHostPort(strings.TrimSpace(rule.RemoteHost), strconv.Itoa(rule.RemotePort))
+}
+
+func closeWrite(conn net.Conn) {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if cw, ok := conn.(closeWriter); ok {
+		_ = cw.CloseWrite()
+		return
+	}
+	_ = conn.Close()
 }
 
 const (

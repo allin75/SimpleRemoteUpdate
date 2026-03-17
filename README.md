@@ -58,7 +58,7 @@ echo -n "你的密钥" | openssl dgst -sha256
 ## 配置说明（核心）
 
 - 系统级：`listen_addr`、`session_cookie`、`auth_key_sha256`、`upload_dir`、`work_dir`、`backup_dir`、`deployments_file`、`log_file`。
-- 程序级（`projects[]`）：`id`、`name`、`service_name`、`target_dir`、`current_version`、`max_upload_mb`、`default_replace_mode`、`allow_initial_deploy`、`service_install_mode`、`service_exe_path`、`service_args`、`service_display_name`、`service_description`、`service_start_type`、`backup_ignore`、`replace_ignore`。
+- 程序级（`projects[]`）：`id`、`name`、`service_name`、`target_dir`、`current_version`、`max_upload_mb`、`default_replace_mode`、`allow_initial_deploy`、`service_install_mode`、`service_exe_path`、`service_args`、`service_display_name`、`service_description`、`service_start_type`、`reverse_proxy_enabled`、`reverse_proxy_bind_ip`、`reverse_proxy_rules`、`backup_ignore`、`replace_ignore`。
 - 系统级补充：`nssm_exe_path`（可选，指定 `nssm.exe` 路径；支持相对路径。相对路径按服务程序所在目录解析；留空则优先尝试程序目录下的 `nssm.exe`，再尝试从 PATH 查找）。
 - `service_name` 可为空：为空时部署/回滚将跳过服务启停，仅进行文件替换。
 
@@ -71,6 +71,19 @@ echo -n "你的密钥" | openssl dgst -sha256
 - `service_exe_path`：服务启动文件，通常填写压缩包解压后的 exe 文件名或相对 `target_dir` 的路径（例如 `MyApp.exe`、`bin/MyApp.exe`）；仅在极少数场景下才需要绝对路径。启用服务安装时必填。
 - `service_args`：服务启动参数数组；页面上按“每行一个”编辑。
 - `service_start_type`：支持 `automatic`、`manual`、`disabled`。
+
+### 内置反代
+
+- `reverse_proxy_enabled=true`：启用项目级反代配置。
+- `reverse_proxy_bind_ip`：本机监听地址；建议用 `0.0.0.0` 监听当前机器全部网卡。
+- `reverse_proxy_rules`：端口映射规则数组，每条规则包含：
+  - `name`：可选备注
+  - `protocol`：`tcp` 或 `udp`
+  - `listen_port`：当前机器对外监听的端口
+  - `remote_host`：远端局域网服务器 IP/主机名
+  - `remote_port`：远端服务器端口
+- 保存当前程序配置后，主进程会自动启动或重启对应的反代子进程，使新规则立即生效。
+- 反代由 `updater.exe` 自己托管，不依赖额外的代理服务，也不会改写业务程序的服务安装配置。
 
 ### 部署时替换策略
 

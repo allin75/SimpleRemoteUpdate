@@ -45,7 +45,11 @@
               <h2 class="text-lg font-semibold">首次部署设置</h2>
               <p id="active-project-title" class="text-xs text-slate-500">未选择程序</p>
             </div>
-            <a href="{{.StandardDeployPath}}" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">返回常规配置</a>
+            <div class="flex items-center gap-2">
+              <button id="open-reverse-proxy-btn" type="button" class="text-xs px-2 py-1 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50">反代配置</button>
+              <button id="restart-reverse-proxy-btn" type="button" class="text-xs px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50">重启反代进程</button>
+              <a href="{{.StandardDeployPath}}" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">返回常规配置</a>
+            </div>
           </div>
           <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
             这个页面只保留首次部署会用到的开关和服务安装项。常规配置、日常更新、版本策略仍在“常规部署”页面处理。
@@ -115,6 +119,9 @@
             </label>
             <input name="max_upload_mb" type="hidden" />
             <input name="default_replace_mode" type="hidden" />
+            <input name="reverse_proxy_enabled" type="hidden" value="false" />
+            <input name="reverse_proxy_bind_ip" type="hidden" value="0.0.0.0" />
+            <textarea name="reverse_proxy_rules_json" hidden>[]</textarea>
             <textarea name="backup_ignore_text" hidden></textarea>
             <textarea name="replace_ignore_text" hidden></textarea>
             <input name="set_default_project" type="hidden" value="false" />
@@ -131,7 +138,11 @@
               <h2 class="text-lg font-semibold">程序配置</h2>
               <p id="active-project-title" class="text-xs text-slate-500">未选择程序</p>
             </div>
-            <button id="delete-project-btn" type="button" class="text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50">删除当前程序</button>
+            <div class="flex items-center gap-2">
+              <button id="open-reverse-proxy-btn" type="button" class="text-xs px-2 py-1 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50">反代配置</button>
+              <button id="restart-reverse-proxy-btn" type="button" class="text-xs px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50">重启反代进程</button>
+              <button id="delete-project-btn" type="button" class="text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50">删除当前程序</button>
+            </div>
           </div>
           <div class="rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 text-sm text-sky-900">
             首次部署相关开关、服务安装和首次下发操作，已移动到上方“首次部署专页”，这里仅保留日常配置和常规更新。
@@ -176,6 +187,9 @@
             <input name="service_start_type" type="hidden" />
             <textarea name="service_description" hidden></textarea>
             <textarea name="service_args_text" hidden></textarea>
+            <input name="reverse_proxy_enabled" type="hidden" value="false" />
+            <input name="reverse_proxy_bind_ip" type="hidden" value="0.0.0.0" />
+            <textarea name="reverse_proxy_rules_json" hidden>[]</textarea>
             <label class="block text-sm md:col-span-2 xl:col-span-3">
               <span class="inline-flex items-center">
                 backup_ignore_text（每行一个忽略规则）
@@ -390,6 +404,62 @@
         <span id="project-create-message" class="text-sm text-slate-600"></span>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="reverse-proxy-dialog" class="w-[min(980px,96vw)] rounded-xl border border-slate-300 bg-white p-0">
+    <div class="p-4 border-b border-slate-300 flex items-center justify-between">
+      <div>
+        <h3 class="text-base font-semibold">反代配置</h3>
+        <p id="reverse-proxy-subtitle" class="text-xs text-slate-500">将远端局域网服务映射到本机端口，供其他局域网设备通过当前机器访问。</p>
+      </div>
+      <button id="reverse-proxy-close" type="button" class="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-100">关闭</button>
+    </div>
+    <div class="p-4 space-y-4">
+      <div class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-3 text-sm text-indigo-900">
+        示例：把远端 `192.168.10.20:5432` 映射到本机 `0.0.0.0:15432` 后，其他电脑就可以直接访问“本机IP:15432”。
+      </div>
+      <label class="inline-flex items-center gap-2 text-sm">
+        <input id="reverse-proxy-enabled" type="checkbox" class="rounded border border-slate-300" />
+        启用反代
+      </label>
+      <label class="block text-sm max-w-sm">
+        本机监听地址
+        <input id="reverse-proxy-bind-ip" placeholder="默认 0.0.0.0" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono" />
+        <span class="mt-1 block text-xs text-slate-500">推荐使用 `0.0.0.0` 监听全部网卡；如只想绑定当前机器的某张网卡，可填写具体本机 IP。</span>
+      </label>
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <div>
+            <h4 class="text-sm font-semibold">端口映射规则</h4>
+            <p class="text-xs text-slate-500">每条规则都是“本机某端口 -> 远端服务器某端口”。</p>
+          </div>
+          <button id="reverse-proxy-add-rule" type="button" class="px-3 py-1.5 rounded border border-slate-300 text-sm hover:bg-slate-50">新增规则</button>
+        </div>
+        <div class="overflow-auto rounded-lg border border-slate-300">
+          <table class="min-w-full text-sm">
+            <thead class="bg-slate-50 text-slate-600">
+              <tr>
+                <th class="px-3 py-2 text-left">名称</th>
+                <th class="px-3 py-2 text-left">协议</th>
+                <th class="px-3 py-2 text-left">本机端口</th>
+                <th class="px-3 py-2 text-left">远端 IP</th>
+                <th class="px-3 py-2 text-left">远端端口</th>
+                <th class="px-3 py-2 text-left">操作</th>
+              </tr>
+            </thead>
+            <tbody id="reverse-proxy-rules-body"></tbody>
+          </table>
+        </div>
+        <p id="reverse-proxy-empty" class="text-xs text-slate-500">暂无映射规则。至少添加一条规则后再启用反代。</p>
+      </section>
+      <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+        反代由当前 `updater.exe` 以子进程方式托管，不再依赖额外代理服务。保存当前程序配置后，系统会自动同步对应的反代进程。
+      </div>
+      <div class="flex items-center gap-3">
+        <button id="reverse-proxy-save" type="button" class="px-4 py-2 rounded bg-indigo-700 text-white hover:bg-indigo-600">写回当前程序</button>
+        <span id="reverse-proxy-message" class="text-sm text-slate-600"></span>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="system-config-dialog" class="w-[min(1100px,96vw)] rounded-xl border border-slate-300 bg-white p-0">

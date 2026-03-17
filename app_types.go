@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"os/exec"
 	"sync"
 	"time"
 )
@@ -37,22 +38,33 @@ type Config struct {
 }
 
 type ManagedProject struct {
-	ID                 string   `json:"id"`
-	Name               string   `json:"name"`
-	ServiceName        string   `json:"service_name"`
-	TargetDir          string   `json:"target_dir"`
-	CurrentVersion     string   `json:"current_version"`
-	DefaultReplaceMode string   `json:"default_replace_mode"`
-	AllowInitialDeploy bool     `json:"allow_initial_deploy"`
-	ServiceInstallMode string   `json:"service_install_mode"`
-	ServiceExePath     string   `json:"service_exe_path"`
-	ServiceArgs        []string `json:"service_args"`
-	ServiceDisplayName string   `json:"service_display_name"`
-	ServiceDescription string   `json:"service_description"`
-	ServiceStartType   string   `json:"service_start_type"`
-	BackupIgnore       []string `json:"backup_ignore"`
-	ReplaceIgnore      []string `json:"replace_ignore"`
-	MaxUploadMB        int64    `json:"max_upload_mb"`
+	ID                  string             `json:"id"`
+	Name                string             `json:"name"`
+	ServiceName         string             `json:"service_name"`
+	TargetDir           string             `json:"target_dir"`
+	CurrentVersion      string             `json:"current_version"`
+	DefaultReplaceMode  string             `json:"default_replace_mode"`
+	AllowInitialDeploy  bool               `json:"allow_initial_deploy"`
+	ServiceInstallMode  string             `json:"service_install_mode"`
+	ServiceExePath      string             `json:"service_exe_path"`
+	ServiceArgs         []string           `json:"service_args"`
+	ServiceDisplayName  string             `json:"service_display_name"`
+	ServiceDescription  string             `json:"service_description"`
+	ServiceStartType    string             `json:"service_start_type"`
+	ReverseProxyEnabled bool               `json:"reverse_proxy_enabled"`
+	ReverseProxyBindIP  string             `json:"reverse_proxy_bind_ip"`
+	ReverseProxyRules   []ReverseProxyRule `json:"reverse_proxy_rules"`
+	BackupIgnore        []string           `json:"backup_ignore"`
+	ReplaceIgnore       []string           `json:"replace_ignore"`
+	MaxUploadMB         int64              `json:"max_upload_mb"`
+}
+
+type ReverseProxyRule struct {
+	Name       string `json:"name"`
+	Protocol   string `json:"protocol"`
+	ListenPort int    `json:"listen_port"`
+	RemoteHost string `json:"remote_host"`
+	RemotePort int    `json:"remote_port"`
 }
 
 type ChangedFile struct {
@@ -108,6 +120,8 @@ const (
 	ServiceStartTypeAutomatic = "automatic"
 	ServiceStartTypeManual    = "manual"
 	ServiceStartTypeDisabled  = "disabled"
+	ReverseProxyProtocolTCP   = "tcp"
+	ReverseProxyProtocolUDP   = "udp"
 )
 
 type ServiceInstallConfig struct {
@@ -133,20 +147,27 @@ type IgnoreMatcher struct {
 	patterns []string
 }
 
+type reverseProxyProcess struct {
+	cmd       *exec.Cmd
+	signature string
+}
+
 type App struct {
-	cfg         Config
-	cfgPath     string
-	cfgMu       sync.RWMutex
-	logWriter   *dynamicLogWriter
-	logger      *slog.Logger
-	templates   *template.Template
-	store       *deploymentStore
-	sessions    *sessionManager
-	events      *eventHub
-	static      http.Handler
-	taskMu      sync.Mutex
-	selfTask    bool
-	projectTask map[string]struct{}
-	schedMu     sync.Mutex
-	schedCancel map[string]func()
+	cfg                 Config
+	cfgPath             string
+	cfgMu               sync.RWMutex
+	logWriter           *dynamicLogWriter
+	logger              *slog.Logger
+	templates           *template.Template
+	store               *deploymentStore
+	sessions            *sessionManager
+	events              *eventHub
+	static              http.Handler
+	taskMu              sync.Mutex
+	selfTask            bool
+	projectTask         map[string]struct{}
+	schedMu             sync.Mutex
+	schedCancel         map[string]func()
+	reverseProxyMu      sync.Mutex
+	reverseProxyWorkers map[string]*reverseProxyProcess
 }
