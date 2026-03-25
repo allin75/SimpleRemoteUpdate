@@ -1622,4 +1622,24 @@
 
   syncProjectNavigation(getQueryProjectId() || getStoredProjectId());
   loadConfig(getQueryProjectId() || getStoredProjectId());
+
+  // 点击常用示例，自动填入 service_restart_cron 输入框
+  document.querySelectorAll(".service-restart-example").forEach((el) => {
+    el.style.cursor = "pointer";
+    el.addEventListener("click", () => {
+      // 获取示例的 cron 表达式（第一个文本节点，不包含 <small> 标签）
+      const cronValue = el.firstChild?.textContent?.trim() || el.textContent.split("<")[0].trim();
+      if (cronValue) {
+        // 找到当前示例所在卡片内的 service_restart_cron 输入框
+        const card = el.closest(".service-restart-card");
+        if (card) {
+          const input = card.querySelector('input[name="service_restart_cron"]');
+          if (input) {
+            input.value = cronValue;
+            input.focus();
+          }
+        }
+      }
+    });
+  });
 })();
