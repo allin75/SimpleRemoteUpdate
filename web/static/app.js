@@ -631,6 +631,8 @@
       name: project?.name || "",
       current_version: project?.current_version || "",
       service_name: project?.service_name || "",
+      service_restart_enabled: Boolean(project?.service_restart_enabled),
+      service_restart_cron: project?.service_restart_cron || "",
       target_dir: project?.target_dir || "",
       max_upload_mb: project?.max_upload_mb || "",
       default_replace_mode: project?.default_replace_mode === "partial" ? "partial" : "full",

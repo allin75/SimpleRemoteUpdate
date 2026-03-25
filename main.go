@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 func main() {
@@ -84,21 +86,24 @@ func main() {
 	}
 
 	app := &App{
-		cfg:                 cfg,
-		cfgPath:             "config.json",
-		logWriter:           logWriter,
-		logger:              logger,
-		templates:           tmpl,
-		store:               store,
-		sessions:            newSessionManager(),
-		events:              newEventHub(),
-		static:              http.FileServer(http.FS(staticFS)),
-		projectTask:         make(map[string]struct{}),
-		schedCancel:         make(map[string]func()),
-		reverseProxyWorkers: make(map[string]*reverseProxyProcess),
+		cfg:                   cfg,
+		cfgPath:               "config.json",
+		logWriter:             logWriter,
+		logger:                logger,
+		templates:             tmpl,
+		store:                 store,
+		sessions:              newSessionManager(),
+		events:                newEventHub(),
+		static:                http.FileServer(http.FS(staticFS)),
+		projectTask:           make(map[string]struct{}),
+		schedCancel:           make(map[string]func()),
+		serviceRestartPending: make(map[string]struct{}),
+		reverseProxyWorkers:   make(map[string]*reverseProxyProcess),
 	}
 	app.resumeScheduledDeployments()
+	app.bootstrapServiceRestartSchedules()
 	app.bootstrapReverseProxyServices()
+	defer app.stopAllServiceRestartSchedules()
 	defer app.stopAllReverseProxyProcesses()
 
 	logger.Info("updater server started",
@@ -1052,6 +1057,9 @@ func (a *App) handleSaveProjectConfig(w http.ResponseWriter, r *http.Request) {
 	project := newCfg.Projects[idx]
 	project.Name = firstNonEmpty(strings.TrimSpace(r.FormValue("name")), projectID)
 	project.ServiceName = strings.TrimSpace(r.FormValue("service_name"))
+	project.ServiceRestartEnabled = parseBoolFormValue(r.FormValue("service_restart_enabled"))
+	project.ServiceRestartCron = normalizeServiceRestartCron(r.FormValue("service_restart_cron"))
+	project.ServiceRestartTime = ""
 	project.TargetDir = strings.TrimSpace(r.FormValue("target_dir"))
 	project.CurrentVersion = normalizeVersion(r.FormValue("current_version"))
 	project.AllowInitialDeploy = parseBoolFormValue(r.FormValue("allow_initial_deploy"))
@@ -1159,24 +1167,27 @@ func (a *App) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := ManagedProject{
-		ID:                  projectID,
-		Name:                firstNonEmpty(strings.TrimSpace(r.FormValue("name")), projectID),
-		ServiceName:         strings.TrimSpace(r.FormValue("service_name")),
-		TargetDir:           strings.TrimSpace(r.FormValue("target_dir")),
-		CurrentVersion:      normalizeVersion(r.FormValue("current_version")),
-		DefaultReplaceMode:  normalizeReplaceMode(r.FormValue("default_replace_mode")),
-		AllowInitialDeploy:  parseBoolFormValue(r.FormValue("allow_initial_deploy")),
-		ServiceInstallMode:  normalizeServiceInstallMode(r.FormValue("service_install_mode")),
-		ServiceExePath:      strings.TrimSpace(r.FormValue("service_exe_path")),
-		ServiceArgs:         splitLinesTrim(r.FormValue("service_args_text")),
-		ServiceDisplayName:  strings.TrimSpace(r.FormValue("service_display_name")),
-		ServiceDescription:  strings.TrimSpace(r.FormValue("service_description")),
-		ServiceStartType:    normalizeServiceStartType(r.FormValue("service_start_type")),
-		ReverseProxyEnabled: parseBoolFormValue(r.FormValue("reverse_proxy_enabled")),
-		ReverseProxyBindIP:  normalizeReverseProxyBindIP(r.FormValue("reverse_proxy_bind_ip")),
-		MaxUploadMB:         maxUploadMB,
-		BackupIgnore:        splitLinesTrim(r.FormValue("backup_ignore_text")),
-		ReplaceIgnore:       splitLinesTrim(r.FormValue("replace_ignore_text")),
+		ID:                    projectID,
+		Name:                  firstNonEmpty(strings.TrimSpace(r.FormValue("name")), projectID),
+		ServiceName:           strings.TrimSpace(r.FormValue("service_name")),
+		ServiceRestartEnabled: parseBoolFormValue(r.FormValue("service_restart_enabled")),
+		ServiceRestartCron:    normalizeServiceRestartCron(r.FormValue("service_restart_cron")),
+		ServiceRestartTime:    "",
+		TargetDir:             strings.TrimSpace(r.FormValue("target_dir")),
+		CurrentVersion:        normalizeVersion(r.FormValue("current_version")),
+		DefaultReplaceMode:    normalizeReplaceMode(r.FormValue("default_replace_mode")),
+		AllowInitialDeploy:    parseBoolFormValue(r.FormValue("allow_initial_deploy")),
+		ServiceInstallMode:    normalizeServiceInstallMode(r.FormValue("service_install_mode")),
+		ServiceExePath:        strings.TrimSpace(r.FormValue("service_exe_path")),
+		ServiceArgs:           splitLinesTrim(r.FormValue("service_args_text")),
+		ServiceDisplayName:    strings.TrimSpace(r.FormValue("service_display_name")),
+		ServiceDescription:    strings.TrimSpace(r.FormValue("service_description")),
+		ServiceStartType:      normalizeServiceStartType(r.FormValue("service_start_type")),
+		ReverseProxyEnabled:   parseBoolFormValue(r.FormValue("reverse_proxy_enabled")),
+		ReverseProxyBindIP:    normalizeReverseProxyBindIP(r.FormValue("reverse_proxy_bind_ip")),
+		MaxUploadMB:           maxUploadMB,
+		BackupIgnore:          splitLinesTrim(r.FormValue("backup_ignore_text")),
+		ReplaceIgnore:         splitLinesTrim(r.FormValue("replace_ignore_text")),
 	}
 	proxyRules, parseErr := parseReverseProxyRulesFormValue(r.FormValue("reverse_proxy_rules_json"))
 	if parseErr != nil {
@@ -1360,6 +1371,8 @@ func configSnapshot(cfg Config) map[string]any {
 		"notify_email_auth_code_set": strings.TrimSpace(cfg.NotifyEmailAuthCode) != "",
 		"self_update_service_name":   cfg.SelfUpdateServiceName,
 		"service_name":               dp.ServiceName,
+		"service_restart_enabled":    dp.ServiceRestartEnabled,
+		"service_restart_cron":       dp.ServiceRestartCron,
 		"target_dir":                 dp.TargetDir,
 		"replace_mode":               dp.DefaultReplaceMode,
 		"default_replace_mode":       dp.DefaultReplaceMode,
@@ -1420,6 +1433,7 @@ func (a *App) applyConfigChanges(w http.ResponseWriter, r *http.Request, oldCfg,
 	}
 
 	a.replaceConfig(newCfg)
+	a.syncServiceRestartSchedules(newCfg)
 	if oldCfg.SessionCookie != newCfg.SessionCookie {
 		if oldCookie, err := r.Cookie(oldCfg.SessionCookie); err == nil && oldCookie.Value != "" {
 			http.SetCookie(w, &http.Cookie{
@@ -1578,6 +1592,8 @@ func nextProjectID(projects []ManagedProject) string {
 }
 
 const scheduledTaskRetryInterval = 5 * time.Second
+const serviceRestartRetryInterval = 30 * time.Second
+const serviceRestartOpTimeout = 45 * time.Second
 
 func parseScheduledAtFormValue(raw string) (time.Time, bool, error) {
 	trimmed := strings.TrimSpace(raw)
@@ -1711,6 +1727,142 @@ func (a *App) resumeScheduledDeployments() {
 		}
 		a.scheduleDeploymentTask(dep.ID, dep.ProjectID, runAt)
 	}
+}
+
+func shouldScheduleServiceRestart(project ManagedProject) bool {
+	if !project.ServiceRestartEnabled {
+		return false
+	}
+	if strings.TrimSpace(project.ServiceName) == "" {
+		return false
+	}
+	return strings.TrimSpace(effectiveServiceRestartSpec(project)) != ""
+}
+
+func (a *App) bootstrapServiceRestartSchedules() {
+	a.syncServiceRestartSchedules(a.currentConfig())
+}
+
+func (a *App) syncServiceRestartSchedules(cfg Config) {
+	a.serviceRestartMu.Lock()
+	if a.serviceRestartCron != nil {
+		a.serviceRestartCron.Stop()
+		a.serviceRestartCron = nil
+	}
+	if a.serviceRestartPending == nil {
+		a.serviceRestartPending = make(map[string]struct{})
+	}
+
+	scheduler := cron.New(
+		cron.WithLocation(time.Local),
+		cron.WithParser(serviceRestartScheduleParser),
+	)
+	added := 0
+	for _, project := range cfg.Projects {
+		if !shouldScheduleServiceRestart(project) {
+			continue
+		}
+		spec := effectiveServiceRestartSpec(project)
+		projectID := project.ID
+		if _, err := scheduler.AddFunc(spec, func() {
+			a.enqueueScheduledServiceRestart(projectID)
+		}); err != nil {
+			a.logger.Warn("service restart schedule ignored", "project_id", projectID, "spec", spec, "error", err.Error())
+			continue
+		}
+		added++
+	}
+	a.serviceRestartCron = scheduler
+	a.serviceRestartMu.Unlock()
+
+	scheduler.Start()
+	a.logger.Info("service restart schedules synced", "count", added)
+}
+
+func (a *App) stopAllServiceRestartSchedules() {
+	a.serviceRestartMu.Lock()
+	defer a.serviceRestartMu.Unlock()
+	if a.serviceRestartCron != nil {
+		a.serviceRestartCron.Stop()
+		a.serviceRestartCron = nil
+	}
+	a.serviceRestartPending = make(map[string]struct{})
+}
+
+func (a *App) enqueueScheduledServiceRestart(projectID string) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return
+	}
+	a.serviceRestartMu.Lock()
+	if _, exists := a.serviceRestartPending[projectID]; exists {
+		a.serviceRestartMu.Unlock()
+		a.logger.Warn("service restart trigger skipped because previous run is still pending", "project_id", projectID)
+		return
+	}
+	a.serviceRestartPending[projectID] = struct{}{}
+	a.serviceRestartMu.Unlock()
+
+	go func() {
+		defer a.clearScheduledServiceRestartPending(projectID)
+		a.executeScheduledServiceRestart(projectID)
+	}()
+}
+
+func (a *App) clearScheduledServiceRestartPending(projectID string) {
+	a.serviceRestartMu.Lock()
+	defer a.serviceRestartMu.Unlock()
+	delete(a.serviceRestartPending, strings.TrimSpace(projectID))
+}
+
+func (a *App) executeScheduledServiceRestart(projectID string) {
+	waitLogged := false
+	for {
+		cfg := a.currentConfig()
+		project, ok := findProjectByID(cfg.Projects, projectID)
+		if !ok {
+			a.logger.Warn("service restart skipped because project was removed", "project_id", projectID)
+			return
+		}
+		if !shouldScheduleServiceRestart(project) {
+			a.logger.Info("service restart skipped because schedule is disabled", "project_id", projectID)
+			return
+		}
+		if ok, reason := a.tryAcquireProjectTask(projectID); ok {
+			if err := a.restartProjectService(project); err != nil {
+				a.logger.Error("scheduled service restart failed", "project_id", projectID, "service_name", project.ServiceName, "error", err.Error())
+			} else {
+				a.logger.Info("scheduled service restart completed", "project_id", projectID, "service_name", project.ServiceName)
+			}
+			a.releaseProjectTask(projectID)
+			return
+		} else if !waitLogged {
+			a.logger.Warn("service restart waiting for project task", "project_id", projectID, "reason", reason)
+			waitLogged = true
+		}
+		time.Sleep(serviceRestartRetryInterval)
+	}
+}
+
+func (a *App) restartProjectService(project ManagedProject) error {
+	serviceName := strings.TrimSpace(project.ServiceName)
+	if serviceName == "" {
+		return errors.New("service_name 不能为空")
+	}
+	exists, err := serviceExists(serviceName)
+	if err != nil {
+		return fmt.Errorf("查询服务状态失败: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("服务不存在: %s", serviceName)
+	}
+	if err := stopService(serviceName, serviceRestartOpTimeout); err != nil {
+		return fmt.Errorf("停止服务失败: %w", err)
+	}
+	if err := startService(serviceName, serviceRestartOpTimeout); err != nil {
+		return fmt.Errorf("启动服务失败: %w", err)
+	}
+	return nil
 }
 
 func (a *App) tryAcquireProjectTask(projectID string) (bool, string) {
@@ -1878,6 +2030,14 @@ func validateRuntimeConfig(cfg Config) error {
 			}
 			if strings.TrimSpace(p.ServiceExePath) == "" {
 				return fmt.Errorf("projects(%s).service_exe_path 不能为空（启用服务安装时请填写压缩包解压后的 exe 文件名或相对路径）", p.ID)
+			}
+		}
+		if p.ServiceRestartEnabled {
+			if strings.TrimSpace(p.ServiceName) == "" {
+				return fmt.Errorf("projects(%s).service_name 不能为空（启用定时重启服务时必填）", p.ID)
+			}
+			if err := validateServiceRestartSpec(effectiveServiceRestartSpec(p)); err != nil {
+				return fmt.Errorf("projects(%s).%s", p.ID, err.Error())
 			}
 		}
 	}

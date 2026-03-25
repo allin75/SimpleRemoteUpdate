@@ -3,30 +3,40 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/robfig/cron/v3"
+)
+
+var serviceRestartScheduleParser = cron.NewParser(
+	cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 )
 
 func normalizeProjects(cfg *Config) {
 	if len(cfg.Projects) == 0 {
 		cfg.Projects = []ManagedProject{{
-			ID:                  "default",
-			Name:                firstNonEmpty(strings.TrimSpace(cfg.ServiceName), "默认程序"),
-			ServiceName:         strings.TrimSpace(cfg.ServiceName),
-			TargetDir:           strings.TrimSpace(cfg.TargetDir),
-			CurrentVersion:      firstNonEmpty(strings.TrimSpace(cfg.CurrentVersion), "0.0.1"),
-			DefaultReplaceMode:  normalizeReplaceMode(cfg.ReplaceMode),
-			AllowInitialDeploy:  false,
-			ServiceInstallMode:  normalizeServiceInstallMode(""),
-			ServiceExePath:      "",
-			ServiceArgs:         nil,
-			ServiceDisplayName:  "",
-			ServiceDescription:  "",
-			ServiceStartType:    normalizeServiceStartType(""),
-			ReverseProxyEnabled: false,
-			ReverseProxyBindIP:  defaultReverseProxyBindIP(),
-			ReverseProxyRules:   nil,
-			BackupIgnore:        append([]string{}, cfg.BackupIgnore...),
-			ReplaceIgnore:       append([]string{}, cfg.ReplaceIgnore...),
-			MaxUploadMB:         cfg.MaxUploadMB,
+			ID:                    "default",
+			Name:                  firstNonEmpty(strings.TrimSpace(cfg.ServiceName), "默认程序"),
+			ServiceName:           strings.TrimSpace(cfg.ServiceName),
+			ServiceRestartEnabled: false,
+			ServiceRestartCron:    "",
+			ServiceRestartTime:    "",
+			TargetDir:             strings.TrimSpace(cfg.TargetDir),
+			CurrentVersion:        firstNonEmpty(strings.TrimSpace(cfg.CurrentVersion), "0.0.1"),
+			DefaultReplaceMode:    normalizeReplaceMode(cfg.ReplaceMode),
+			AllowInitialDeploy:    false,
+			ServiceInstallMode:    normalizeServiceInstallMode(""),
+			ServiceExePath:        "",
+			ServiceArgs:           nil,
+			ServiceDisplayName:    "",
+			ServiceDescription:    "",
+			ServiceStartType:      normalizeServiceStartType(""),
+			ReverseProxyEnabled:   false,
+			ReverseProxyBindIP:    defaultReverseProxyBindIP(),
+			ReverseProxyRules:     nil,
+			BackupIgnore:          append([]string{}, cfg.BackupIgnore...),
+			ReplaceIgnore:         append([]string{}, cfg.ReplaceIgnore...),
+			MaxUploadMB:           cfg.MaxUploadMB,
 		}}
 	}
 
@@ -44,6 +54,12 @@ func normalizeProjects(cfg *Config) {
 
 		p.Name = firstNonEmpty(strings.TrimSpace(p.Name), p.ID)
 		p.ServiceName = strings.TrimSpace(p.ServiceName)
+		p.ServiceRestartCron = normalizeServiceRestartCron(p.ServiceRestartCron)
+		p.ServiceRestartTime = normalizeLegacyServiceRestartTime(p.ServiceRestartTime)
+		if p.ServiceRestartCron == "" && p.ServiceRestartTime != "" {
+			p.ServiceRestartCron = legacyServiceRestartTimeToCron(p.ServiceRestartTime)
+			p.ServiceRestartTime = ""
+		}
 		p.TargetDir = strings.TrimSpace(p.TargetDir)
 		p.CurrentVersion = firstNonEmpty(strings.TrimSpace(p.CurrentVersion), "0.0.1")
 		mode := strings.TrimSpace(p.DefaultReplaceMode)
@@ -76,25 +92,28 @@ func normalizeProjects(cfg *Config) {
 	}
 	if len(out) == 0 {
 		out = []ManagedProject{{
-			ID:                  "default",
-			Name:                "默认程序",
-			ServiceName:         strings.TrimSpace(cfg.ServiceName),
-			TargetDir:           strings.TrimSpace(cfg.TargetDir),
-			CurrentVersion:      "0.0.1",
-			DefaultReplaceMode:  normalizeReplaceMode(cfg.ReplaceMode),
-			AllowInitialDeploy:  false,
-			ServiceInstallMode:  normalizeServiceInstallMode(""),
-			ServiceExePath:      "",
-			ServiceArgs:         nil,
-			ServiceDisplayName:  "",
-			ServiceDescription:  "",
-			ServiceStartType:    normalizeServiceStartType(""),
-			ReverseProxyEnabled: false,
-			ReverseProxyBindIP:  defaultReverseProxyBindIP(),
-			ReverseProxyRules:   nil,
-			BackupIgnore:        append([]string{}, cfg.BackupIgnore...),
-			ReplaceIgnore:       append([]string{}, cfg.ReplaceIgnore...),
-			MaxUploadMB:         firstInt64(cfg.MaxUploadMB, 1024),
+			ID:                    "default",
+			Name:                  "默认程序",
+			ServiceName:           strings.TrimSpace(cfg.ServiceName),
+			ServiceRestartEnabled: false,
+			ServiceRestartCron:    "",
+			ServiceRestartTime:    "",
+			TargetDir:             strings.TrimSpace(cfg.TargetDir),
+			CurrentVersion:        "0.0.1",
+			DefaultReplaceMode:    normalizeReplaceMode(cfg.ReplaceMode),
+			AllowInitialDeploy:    false,
+			ServiceInstallMode:    normalizeServiceInstallMode(""),
+			ServiceExePath:        "",
+			ServiceArgs:           nil,
+			ServiceDisplayName:    "",
+			ServiceDescription:    "",
+			ServiceStartType:      normalizeServiceStartType(""),
+			ReverseProxyEnabled:   false,
+			ReverseProxyBindIP:    defaultReverseProxyBindIP(),
+			ReverseProxyRules:     nil,
+			BackupIgnore:          append([]string{}, cfg.BackupIgnore...),
+			ReplaceIgnore:         append([]string{}, cfg.ReplaceIgnore...),
+			MaxUploadMB:           firstInt64(cfg.MaxUploadMB, 1024),
 		}}
 	}
 	cfg.Projects = out
@@ -133,25 +152,28 @@ func getDefaultProject(cfg Config) ManagedProject {
 		return cfg.Projects[0]
 	}
 	return ManagedProject{
-		ID:                  "default",
-		Name:                "默认程序",
-		ServiceName:         cfg.ServiceName,
-		TargetDir:           cfg.TargetDir,
-		CurrentVersion:      firstNonEmpty(cfg.CurrentVersion, "0.0.1"),
-		DefaultReplaceMode:  normalizeReplaceMode(cfg.ReplaceMode),
-		AllowInitialDeploy:  false,
-		ServiceInstallMode:  normalizeServiceInstallMode(""),
-		ServiceExePath:      "",
-		ServiceArgs:         nil,
-		ServiceDisplayName:  "",
-		ServiceDescription:  "",
-		ServiceStartType:    normalizeServiceStartType(""),
-		ReverseProxyEnabled: false,
-		ReverseProxyBindIP:  defaultReverseProxyBindIP(),
-		ReverseProxyRules:   nil,
-		BackupIgnore:        append([]string{}, cfg.BackupIgnore...),
-		ReplaceIgnore:       append([]string{}, cfg.ReplaceIgnore...),
-		MaxUploadMB:         firstInt64(cfg.MaxUploadMB, 1024),
+		ID:                    "default",
+		Name:                  "默认程序",
+		ServiceName:           cfg.ServiceName,
+		ServiceRestartEnabled: false,
+		ServiceRestartCron:    "",
+		ServiceRestartTime:    "",
+		TargetDir:             cfg.TargetDir,
+		CurrentVersion:        firstNonEmpty(cfg.CurrentVersion, "0.0.1"),
+		DefaultReplaceMode:    normalizeReplaceMode(cfg.ReplaceMode),
+		AllowInitialDeploy:    false,
+		ServiceInstallMode:    normalizeServiceInstallMode(""),
+		ServiceExePath:        "",
+		ServiceArgs:           nil,
+		ServiceDisplayName:    "",
+		ServiceDescription:    "",
+		ServiceStartType:      normalizeServiceStartType(""),
+		ReverseProxyEnabled:   false,
+		ReverseProxyBindIP:    defaultReverseProxyBindIP(),
+		ReverseProxyRules:     nil,
+		BackupIgnore:          append([]string{}, cfg.BackupIgnore...),
+		ReplaceIgnore:         append([]string{}, cfg.ReplaceIgnore...),
+		MaxUploadMB:           firstInt64(cfg.MaxUploadMB, 1024),
 	}
 }
 
@@ -193,6 +215,51 @@ func normalizeServiceStartType(v string) string {
 	default:
 		return ServiceStartTypeAutomatic
 	}
+}
+
+func normalizeServiceRestartCron(v string) string {
+	return strings.TrimSpace(v)
+}
+
+func normalizeLegacyServiceRestartTime(v string) string {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return ""
+	}
+	if _, err := time.Parse("15:04", trimmed); err != nil {
+		return ""
+	}
+	return trimmed
+}
+
+func legacyServiceRestartTimeToCron(v string) string {
+	trimmed := normalizeLegacyServiceRestartTime(v)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := time.Parse("15:04", trimmed)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d %d * * *", parsed.Minute(), parsed.Hour())
+}
+
+func effectiveServiceRestartSpec(project ManagedProject) string {
+	if spec := normalizeServiceRestartCron(project.ServiceRestartCron); spec != "" {
+		return spec
+	}
+	return legacyServiceRestartTimeToCron(project.ServiceRestartTime)
+}
+
+func validateServiceRestartSpec(spec string) error {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return fmt.Errorf("service_restart_cron 不能为空")
+	}
+	if _, err := serviceRestartScheduleParser.Parse(spec); err != nil {
+		return fmt.Errorf("service_restart_cron 格式错误: %w", err)
+	}
+	return nil
 }
 
 func normalizeServiceArgs(args []string) []string {

@@ -93,6 +93,76 @@ func TestValidateRuntimeConfigAllowsReverseProxyOnBusinessProject(t *testing.T) 
 	}
 }
 
+func TestValidateRuntimeConfigRequiresCronWhenTimedRestartEnabled(t *testing.T) {
+	cfg := Config{
+		ListenAddr:       ":12333",
+		SessionCookie:    "updater_session",
+		DefaultProjectID: "proxy",
+		TargetDir:        "E:/Target",
+		UploadDir:        "data/uploads",
+		WorkDir:          "data/work",
+		BackupDir:        "data/backups",
+		DeploymentsFile:  "data/deployments.json",
+		LogFile:          "data/updater.log",
+		MaxUploadMB:      128,
+		Projects: []ManagedProject{
+			{
+				ID:                    "proxy",
+				Name:                  "业务程序",
+				ServiceName:           "business-service",
+				ServiceRestartEnabled: true,
+				ServiceRestartCron:    "",
+				TargetDir:             "E:/Target",
+				CurrentVersion:        "1.0.0",
+				DefaultReplaceMode:    ReplaceModeFull,
+				MaxUploadMB:           128,
+			},
+		},
+	}
+
+	if err := validateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected invalid config when timed restart is enabled without cron")
+	}
+}
+
+func TestValidateServiceRestartSpecAcceptsCronInterval(t *testing.T) {
+	if err := validateServiceRestartSpec("*/30 * * * *"); err != nil {
+		t.Fatalf("expected cron interval to be valid, got %v", err)
+	}
+	if err := validateServiceRestartSpec("@every 30m"); err != nil {
+		t.Fatalf("expected descriptor interval to be valid, got %v", err)
+	}
+}
+
+func TestNormalizeProjectsMigratesLegacyRestartTimeToCron(t *testing.T) {
+	cfg := Config{
+		ReplaceMode:      ReplaceModeFull,
+		MaxUploadMB:      256,
+		DefaultProjectID: "proxy",
+		Projects: []ManagedProject{
+			{
+				ID:                    "proxy",
+				Name:                  "业务程序",
+				ServiceName:           "business-service",
+				ServiceRestartEnabled: true,
+				ServiceRestartTime:    "22:15",
+				TargetDir:             "C:/Proxy",
+				CurrentVersion:        "1.0.0",
+				DefaultReplaceMode:    ReplaceModeFull,
+			},
+		},
+	}
+
+	normalizeProjects(&cfg)
+	project := cfg.Projects[0]
+	if project.ServiceRestartCron != "15 22 * * *" {
+		t.Fatalf("expected legacy time migrated to cron, got %q", project.ServiceRestartCron)
+	}
+	if project.ServiceRestartTime != "" {
+		t.Fatalf("expected legacy time cleared after migration, got %q", project.ServiceRestartTime)
+	}
+}
+
 func TestReverseProxyProjectSignatureTracksRuleChanges(t *testing.T) {
 	base := ManagedProject{
 		ID:                  "proxy",

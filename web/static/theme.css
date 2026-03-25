@@ -239,3 +239,136 @@ details > summary {
   width: 100%;
   min-width: 0;
 }
+
+.service-restart-card {
+  border: 1px solid rgba(82, 146, 222, 0.32);
+  background:
+    linear-gradient(180deg, rgba(12, 30, 57, 0.82), rgba(8, 22, 44, 0.76)),
+    radial-gradient(circle at top right, rgba(47, 164, 255, 0.16), transparent 42%);
+  border-radius: 16px;
+  padding: 16px 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 28px rgba(2, 8, 18, 0.2);
+}
+
+.service-restart-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.service-restart-card__title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.service-restart-card__title {
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.service-restart-card__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(101, 191, 255, 0.3);
+  background: rgba(47, 164, 255, 0.12);
+  color: #8dd2ff;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.service-restart-card__desc {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  max-width: 760px;
+}
+
+.service-restart-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(93, 132, 187, 0.28);
+  background: rgba(7, 19, 38, 0.62);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.service-restart-toggle input {
+  margin: 0;
+}
+
+.service-restart-card__body {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(240px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.service-restart-card__tips {
+  border: 1px dashed rgba(98, 154, 214, 0.28);
+  border-radius: 14px;
+  background: rgba(5, 16, 31, 0.4);
+  padding: 12px;
+}
+
+.service-restart-card__tips-title {
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.service-restart-card__examples {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.service-restart-example {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(12, 29, 55, 0.7);
+  border: 1px solid rgba(88, 132, 191, 0.18);
+  color: #dbe9ff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace;
+  font-size: 0.78rem;
+}
+
+.service-restart-example small {
+  color: var(--muted);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.72rem;
+}
+
+@media (max-width: 767px) {
+  .service-restart-card {
+    padding: 14px;
+  }
+
+  .service-restart-card__head,
+  .service-restart-card__body {
+    display: block;
+  }
+
+  .service-restart-toggle {
+    margin-top: 12px;
+  }
+
+  .service-restart-card__tips {
+    margin-top: 14px;
+  }
+}

@@ -1,0 +1,11 @@
+services:
+  - name: "SmartCollect"
+    addr: ":7100"
+    handler:
+      type: tcp
+    listener:
+      type: tcp
+    forwarder:
+      nodes:
+        - name: "target-1"
+          addr: "192.168.123.80:9090"

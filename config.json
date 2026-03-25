@@ -19,6 +19,9 @@
       "service_display_name": "",
       "service_description": "",
       "service_start_type": "automatic",
+      "reverse_proxy_enabled": false,
+      "reverse_proxy_bind_ip": "0.0.0.0",
+      "reverse_proxy_rules": null,
       "backup_ignore": [
         "logs/",
         "temp/",
@@ -46,6 +49,9 @@
       "service_display_name": "",
       "service_description": "",
       "service_start_type": "automatic",
+      "reverse_proxy_enabled": false,
+      "reverse_proxy_bind_ip": "0.0.0.0",
+      "reverse_proxy_rules": null,
       "backup_ignore": [
         "logs/",
         "temp/",
@@ -73,6 +79,17 @@
       "service_display_name": "MiseSmartAudit",
       "service_description": "",
       "service_start_type": "automatic",
+      "reverse_proxy_enabled": true,
+      "reverse_proxy_bind_ip": "0.0.0.0",
+      "reverse_proxy_rules": [
+        {
+          "name": "smart collector",
+          "protocol": "tcp",
+          "listen_port": 7200,
+          "remote_host": "192.168.123.80",
+          "remote_port": 9090
+        }
+      ],
       "backup_ignore": [
         "logs/",
         "temp/",
@@ -85,6 +102,46 @@
         "appsettings.json"
       ],
       "max_upload_mb": 1024
+    },
+    {
+      "id": "gost-proxy",
+      "name": "GOST代理",
+      "service_name": "gost-proxy",
+      "target_dir": "E:\\AutomaticUpdates\\gost-proxy",
+      "current_version": "0.0.1",
+      "default_replace_mode": "full",
+      "allow_initial_deploy": true,
+      "service_install_mode": "nssm",
+      "service_exe_path": "gost.exe",
+      "service_args": [
+        "-C",
+        "gost.generated.yaml"
+      ],
+      "service_display_name": "GOST Proxy",
+      "service_description": "GOST TCP 端口转发代理",
+      "service_start_type": "automatic",
+      "reverse_proxy_enabled": false,
+      "reverse_proxy_bind_ip": "0.0.0.0",
+      "reverse_proxy_rules": [
+        {
+          "name": "SmartCollect",
+          "protocol": "tcp",
+          "listen_port": 7100,
+          "remote_host": "192.168.123.80",
+          "remote_port": 9090
+        }
+      ],
+      "backup_ignore": [
+        "logs/",
+        "temp/",
+        "*.log"
+      ],
+      "replace_ignore": [
+        "logs/",
+        "temp/",
+        "*.log"
+      ],
+      "max_upload_mb": 128
     }
   ],
   "upload_dir": "data/uploads",

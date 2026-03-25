@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 //go:embed web/templates/*.html web/static/*
@@ -38,25 +40,28 @@ type Config struct {
 }
 
 type ManagedProject struct {
-	ID                  string             `json:"id"`
-	Name                string             `json:"name"`
-	ServiceName         string             `json:"service_name"`
-	TargetDir           string             `json:"target_dir"`
-	CurrentVersion      string             `json:"current_version"`
-	DefaultReplaceMode  string             `json:"default_replace_mode"`
-	AllowInitialDeploy  bool               `json:"allow_initial_deploy"`
-	ServiceInstallMode  string             `json:"service_install_mode"`
-	ServiceExePath      string             `json:"service_exe_path"`
-	ServiceArgs         []string           `json:"service_args"`
-	ServiceDisplayName  string             `json:"service_display_name"`
-	ServiceDescription  string             `json:"service_description"`
-	ServiceStartType    string             `json:"service_start_type"`
-	ReverseProxyEnabled bool               `json:"reverse_proxy_enabled"`
-	ReverseProxyBindIP  string             `json:"reverse_proxy_bind_ip"`
-	ReverseProxyRules   []ReverseProxyRule `json:"reverse_proxy_rules"`
-	BackupIgnore        []string           `json:"backup_ignore"`
-	ReplaceIgnore       []string           `json:"replace_ignore"`
-	MaxUploadMB         int64              `json:"max_upload_mb"`
+	ID                    string             `json:"id"`
+	Name                  string             `json:"name"`
+	ServiceName           string             `json:"service_name"`
+	ServiceRestartEnabled bool               `json:"service_restart_enabled"`
+	ServiceRestartCron    string             `json:"service_restart_cron"`
+	ServiceRestartTime    string             `json:"service_restart_time"`
+	TargetDir             string             `json:"target_dir"`
+	CurrentVersion        string             `json:"current_version"`
+	DefaultReplaceMode    string             `json:"default_replace_mode"`
+	AllowInitialDeploy    bool               `json:"allow_initial_deploy"`
+	ServiceInstallMode    string             `json:"service_install_mode"`
+	ServiceExePath        string             `json:"service_exe_path"`
+	ServiceArgs           []string           `json:"service_args"`
+	ServiceDisplayName    string             `json:"service_display_name"`
+	ServiceDescription    string             `json:"service_description"`
+	ServiceStartType      string             `json:"service_start_type"`
+	ReverseProxyEnabled   bool               `json:"reverse_proxy_enabled"`
+	ReverseProxyBindIP    string             `json:"reverse_proxy_bind_ip"`
+	ReverseProxyRules     []ReverseProxyRule `json:"reverse_proxy_rules"`
+	BackupIgnore          []string           `json:"backup_ignore"`
+	ReplaceIgnore         []string           `json:"replace_ignore"`
+	MaxUploadMB           int64              `json:"max_upload_mb"`
 }
 
 type ReverseProxyRule struct {
@@ -153,21 +158,24 @@ type reverseProxyProcess struct {
 }
 
 type App struct {
-	cfg                 Config
-	cfgPath             string
-	cfgMu               sync.RWMutex
-	logWriter           *dynamicLogWriter
-	logger              *slog.Logger
-	templates           *template.Template
-	store               *deploymentStore
-	sessions            *sessionManager
-	events              *eventHub
-	static              http.Handler
-	taskMu              sync.Mutex
-	selfTask            bool
-	projectTask         map[string]struct{}
-	schedMu             sync.Mutex
-	schedCancel         map[string]func()
-	reverseProxyMu      sync.Mutex
-	reverseProxyWorkers map[string]*reverseProxyProcess
+	cfg                   Config
+	cfgPath               string
+	cfgMu                 sync.RWMutex
+	logWriter             *dynamicLogWriter
+	logger                *slog.Logger
+	templates             *template.Template
+	store                 *deploymentStore
+	sessions              *sessionManager
+	events                *eventHub
+	static                http.Handler
+	taskMu                sync.Mutex
+	selfTask              bool
+	projectTask           map[string]struct{}
+	schedMu               sync.Mutex
+	schedCancel           map[string]func()
+	serviceRestartMu      sync.Mutex
+	serviceRestartCron    *cron.Cron
+	serviceRestartPending map[string]struct{}
+	reverseProxyMu        sync.Mutex
+	reverseProxyWorkers   map[string]*reverseProxyProcess
 }
