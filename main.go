@@ -1260,6 +1260,22 @@ func (a *App) handleProjectItemAPI(w http.ResponseWriter, r *http.Request) {
 		a.handleProjectReverseProxyRestartAPI(w, r, segments[0])
 		return
 	}
+	if len(segments) == 2 && segments[1] == "info" {
+		a.handleProjectInfoAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) == 2 && segments[1] == "files" {
+		a.handleProjectFilesAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) == 3 && segments[1] == "files" && segments[2] == "upload" {
+		a.handleProjectFilesUploadAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) == 3 && segments[1] == "files" {
+		a.handleProjectFileDeleteAPI(w, r, segments[0], segments[2])
+		return
+	}
 	if len(segments) != 1 {
 		http.NotFound(w, r)
 		return
@@ -1341,6 +1357,101 @@ func (a *App) handleProjectReverseProxyRestartAPI(w http.ResponseWriter, r *http
 		"ok":      true,
 		"message": firstNonEmpty(msg, "反代子进程已重启"),
 	})
+}
+
+// ── project info (rich-text note) ──────────────────────────────────────────
+
+func (a *App) handleProjectInfoAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	cfg := a.currentConfig()
+	if _, ok := findProjectByID(cfg.Projects, projectID); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	info := a.loadProjectInfo(projectID)
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, info)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := parseRequestForm(r); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求参数解析失败"})
+		return
+	}
+	note := r.FormValue("note")
+	if err := a.saveProjectInfo(projectID, note); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("保存失败: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "项目备注已保存"})
+}
+
+// ── project files ──────────────────────────────────────────────────────────
+
+func (a *App) handleProjectFilesAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	cfg := a.currentConfig()
+	if _, ok := findProjectByID(cfg.Projects, projectID); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	files, err := a.listProjectFiles(projectID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("读取文件列表失败: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, files)
+}
+
+func (a *App) handleProjectFilesUploadAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	cfg := a.currentConfig()
+	if _, ok := findProjectByID(cfg.Projects, projectID); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("解析上传数据失败: %v", err)})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少上传文件字段 `file`"})
+		return
+	}
+	defer file.Close()
+	remark := r.FormValue("remark")
+	meta, err := a.saveProjectFile(projectID, header.Filename, file, remark)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("保存文件失败: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "file": meta})
+}
+
+func (a *App) handleProjectFileDeleteAPI(w http.ResponseWriter, r *http.Request, projectID, filename string) {
+	cfg := a.currentConfig()
+	if _, ok := findProjectByID(cfg.Projects, projectID); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := a.deleteProjectFile(projectID, filename); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("删除文件失败: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "文件已删除"})
 }
 
 func parseRequestForm(r *http.Request) error {
@@ -3040,4 +3151,148 @@ func appendSelfUpdateLog(logFile, format string, args ...any) {
 	defer f.Close()
 	line := fmt.Sprintf(format, args...)
 	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), line)
+}
+
+// ── project info storage ─────────────────────────────────────────────────────
+
+type projectInfo struct {
+	Note      string `json:"note"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type projectFileMeta struct {
+	Name       string `json:"name"`
+	Original   string `json:"original"`
+	Size       int64  `json:"size"`
+	Remark     string `json:"remark"`
+	UploadedAt string `json:"uploaded_at"`
+}
+
+func (a *App) projectBaseDir(projectID string) string {
+	// Use work_dir as the parent, not target_dir — keeps project data in the updater's own space
+	cfg := a.currentConfig()
+	return filepath.Join(strings.TrimRight(cfg.WorkDir, string(os.PathSeparator)), "projects", projectID)
+}
+
+func (a *App) projectInfoPath(projectID string) string {
+	return filepath.Join(a.projectBaseDir(projectID), "info.json")
+}
+
+func (a *App) projectFilesDir(projectID string) string {
+	return filepath.Join(a.projectBaseDir(projectID), "files")
+}
+
+func (a *App) projectFileMetaPath(projectID, filename string) string {
+	return filepath.Join(a.projectFilesDir(projectID), filename+".meta.json")
+}
+
+func (a *App) loadProjectInfo(projectID string) *projectInfo {
+	data, err := os.ReadFile(a.projectInfoPath(projectID))
+	if err != nil || len(data) == 0 {
+		return &projectInfo{}
+	}
+	var info projectInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return &projectInfo{}
+	}
+	return &info
+}
+
+func (a *App) saveProjectInfo(projectID, note string) error {
+	base := a.projectBaseDir(projectID)
+	if err := os.MkdirAll(base, 0755); err != nil {
+		return err
+	}
+	info := projectInfo{
+		Note:      note,
+		UpdatedAt: time.Now().Format("2006-01-02T15:04:05"),
+	}
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(a.projectInfoPath(projectID), data, 0644)
+}
+
+func (a *App) listProjectFiles(projectID string) ([]projectFileMeta, error) {
+	dir := a.projectFilesDir(projectID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []projectFileMeta{}, nil
+		}
+		return nil, err
+	}
+	var result []projectFileMeta
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".meta.json") {
+			continue
+		}
+		name := entry.Name()
+		metaPath := a.projectFileMetaPath(projectID, name)
+		data, err := os.ReadFile(metaPath)
+		var meta projectFileMeta
+		if err == nil && len(data) > 0 {
+			_ = json.Unmarshal(data, &meta)
+		}
+		if meta.Name == "" {
+			meta.Name = name
+			meta.Original = name
+		}
+		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			meta.Size = fi.Size()
+		}
+		if meta.UploadedAt == "" {
+			meta.UploadedAt = "unknown"
+		}
+		result = append(result, meta)
+	}
+	return result, nil
+}
+
+func (a *App) saveProjectFile(projectID, originalName string, r io.Reader, remark string) (*projectFileMeta, error) {
+	dir := a.projectFilesDir(projectID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+	// Sanitize filename: remove path separators, keep base name
+	safeName := filepath.Base(strings.TrimSpace(originalName))
+	if safeName == "" || safeName == "." || safeName == ".." {
+		safeName = "file"
+	}
+	// Avoid collisions by appending a short timestamp suffix if name exists
+	dstPath := filepath.Join(dir, safeName)
+	if _, err := os.Stat(dstPath); err == nil {
+		ext := filepath.Ext(safeName)
+		base := strings.TrimSuffix(safeName, ext)
+		safeName = fmt.Sprintf("%s_%d%s", base, time.Now().UnixNano()%100000, ext)
+		dstPath = filepath.Join(dir, safeName)
+	}
+	f, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	size, err := io.Copy(f, r)
+	if err != nil {
+		return nil, err
+	}
+	meta := projectFileMeta{
+		Name:       safeName,
+		Original:   originalName,
+		Size:       size,
+		Remark:     remark,
+		UploadedAt: time.Now().Format("2006-01-02T15:04:05"),
+	}
+	metaData, _ := json.MarshalIndent(meta, "", "  ")
+	_ = os.WriteFile(a.projectFileMetaPath(projectID, safeName), metaData, 0644)
+	return &meta, nil
+}
+
+func (a *App) deleteProjectFile(projectID, filename string) error {
+	filename = filepath.Base(filename) // prevent path traversal
+	metaPath := a.projectFileMetaPath(projectID, filename)
+	filePath := filepath.Join(a.projectFilesDir(projectID), filename)
+	_ = os.Remove(metaPath)
+	return os.Remove(filePath)
 }

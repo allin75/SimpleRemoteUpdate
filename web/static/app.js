@@ -70,6 +70,36 @@
   const changesPreviewHint = document.getElementById("changes-preview-hint");
   const changesPreviewCancel = document.getElementById("changes-preview-cancel");
   const changesPreviewConfirm = document.getElementById("changes-preview-confirm");
+
+  const projectInfoDialog = document.getElementById("project-info-dialog");
+  const projectInfoClose = document.getElementById("project-info-close");
+  const projectInfoSubtitle = document.getElementById("project-info-subtitle");
+  const projectInfoTabFiles = document.getElementById("project-info-tab-files");
+  const projectInfoTabNote = document.getElementById("project-info-tab-note");
+  const projectInfoPanelFiles = document.getElementById("project-info-panel-files");
+  const projectInfoPanelNote = document.getElementById("project-info-panel-note");
+  const projectInfoFileInput = document.getElementById("project-info-file-input");
+  const projectInfoFileRemark = document.getElementById("project-info-file-remark");
+  const projectInfoUploadBtn = document.getElementById("project-info-upload-btn");
+  const projectInfoUploadMsg = document.getElementById("project-info-upload-msg");
+  const projectInfoFilesBody = document.getElementById("project-info-files-body");
+  const projectInfoFilesEmpty = document.getElementById("project-info-files-empty");
+  const projectInfoSaveNoteBtn = document.getElementById("project-info-save-note-btn");
+  const projectInfoNoteMsg = document.getElementById("project-info-note-msg");
+  const projectInfoNoteEditBtn = document.getElementById("project-info-note-edit-btn");
+  const projectInfoNoteCancelBtn = document.getElementById("project-info-note-cancel-btn");
+  const projectInfoFileCount = document.getElementById("project-info-file-count");
+  const projectInfoTotalSize = document.getElementById("project-info-total-size");
+  const projectInfoNoteUpdated = document.getElementById("project-info-note-updated");
+  const projectInfoNoteUpdatedSide = document.getElementById("project-info-note-updated-side");
+  const projectInfoSelectedFile = document.getElementById("project-info-selected-file");
+  const projectInfoSelectedName = document.getElementById("project-info-selected-name");
+  const projectInfoSelectedMeta = document.getElementById("project-info-selected-meta");
+  const projectInfoLibraryHint = document.getElementById("project-info-library-hint");
+  const projectInfoNoteView = document.getElementById("project-info-note-view");
+  const projectInfoNoteEmpty = document.getElementById("project-info-note-empty");
+  const projectInfoNoteEditorWrap = document.getElementById("project-info-note-editor-wrap");
+
   const activeProjectStorageKey = "updater.activeProjectId";
 
   let eventSource = null;
@@ -1642,4 +1672,403 @@
       }
     });
   });
+
+  // ── project-info dialog ─────────────────────────────────────────────────
+  let projectInfoQuill = null;
+  let currentProjectInfoId = null;
+  let currentProjectInfoNoteHTML = "";
+  let projectInfoNoteEditing = false;
+
+  function normalizeProjectInfoNoteHTML(html) {
+    const raw = `${html || ""}`.trim();
+    if (!raw || raw === "<p><br></p>") return "";
+    return raw;
+  }
+
+  function hasProjectInfoNoteContent(html) {
+    const normalized = normalizeProjectInfoNoteHTML(html);
+    if (!normalized) return false;
+    const text = normalized.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim();
+    return Boolean(text);
+  }
+
+  function formatProjectInfoTime(value) {
+    const raw = `${value || ""}`.trim();
+    if (!raw || raw === "unknown") return "未记录";
+    return raw.replace("T", " ").slice(0, 16);
+  }
+
+  function setProjectInfoInlineMessage(el, text = "", tone = "muted") {
+    if (!el) return;
+    el.textContent = `${text || ""}`.trim();
+    el.dataset.tone = tone;
+  }
+
+  function setProjectInfoSelectedFile(file) {
+    if (!projectInfoSelectedFile || !projectInfoSelectedName || !projectInfoSelectedMeta) return;
+    if (!file) {
+      projectInfoSelectedFile.classList.add("is-empty");
+      projectInfoSelectedName.textContent = "尚未选择文件";
+      projectInfoSelectedMeta.textContent = "点击上传区或拖拽文件后，这里会显示文件名与大小。";
+      return;
+    }
+    projectInfoSelectedFile.classList.remove("is-empty");
+    projectInfoSelectedName.textContent = file.name || "未命名文件";
+    projectInfoSelectedMeta.textContent = `${formatBytes(file.size)} · ${getFileTypeToken(file.name)}`;
+  }
+
+  function updateProjectInfoSummary(files = []) {
+    const list = Array.isArray(files) ? files : [];
+    const totalSize = list.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+    if (projectInfoFileCount) projectInfoFileCount.textContent = `${list.length}`;
+    if (projectInfoTotalSize) projectInfoTotalSize.textContent = formatBytes(totalSize);
+    if (projectInfoLibraryHint) {
+      projectInfoLibraryHint.textContent = list.length
+        ? `当前共 ${list.length} 份资料，便于集中管理部署附件与交付材料。`
+        : "这里展示当前项目已上传的文件、备注和时间信息。";
+    }
+  }
+
+  function setProjectInfoNoteUpdatedAt(value) {
+    const text = formatProjectInfoTime(value);
+    if (projectInfoNoteUpdated) projectInfoNoteUpdated.textContent = text;
+    if (projectInfoNoteUpdatedSide) projectInfoNoteUpdatedSide.textContent = text;
+  }
+
+  function ensureProjectInfoEditor() {
+    if (projectInfoQuill) return true;
+    if (typeof Quill !== "function" || !document.getElementById("project-info-editor")) return false;
+    projectInfoQuill = new Quill("#project-info-editor", {
+      theme: "snow",
+      placeholder: "在这里记录部署步骤、账号说明、故障处理经验和交付约束...",
+      modules: { toolbar: [["bold", "italic", "underline"], [{ list: "ordered" }, { list: "bullet" }], ["clean"]] },
+    });
+    syncProjectInfoNoteEditor();
+    return true;
+  }
+
+  function syncProjectInfoNoteEditor() {
+    if (!projectInfoQuill) return;
+    const html = normalizeProjectInfoNoteHTML(currentProjectInfoNoteHTML);
+    if (!html) {
+      projectInfoQuill.setText("");
+      return;
+    }
+    try {
+      projectInfoQuill.setText("");
+      projectInfoQuill.clipboard.dangerouslyPasteHTML(html, "silent");
+    } catch (_err) {
+      projectInfoQuill.root.innerHTML = html;
+    }
+  }
+
+  function renderProjectInfoNoteView() {
+    if (!projectInfoNoteView || !projectInfoNoteEmpty) return;
+    const html = normalizeProjectInfoNoteHTML(currentProjectInfoNoteHTML);
+    const hasContent = hasProjectInfoNoteContent(html);
+    projectInfoNoteView.classList.toggle("hidden", !hasContent);
+    projectInfoNoteEmpty.classList.toggle("hidden", hasContent);
+    if (hasContent) {
+      projectInfoNoteView.innerHTML = html;
+      return;
+    }
+    projectInfoNoteView.innerHTML = "";
+  }
+
+  function setProjectInfoNoteEditing(editing) {
+    projectInfoNoteEditing = Boolean(editing);
+    projectInfoNoteEditorWrap?.classList.toggle("hidden", !projectInfoNoteEditing);
+    projectInfoNoteEditBtn?.classList.toggle("hidden", projectInfoNoteEditing);
+    projectInfoSaveNoteBtn?.classList.toggle("hidden", !projectInfoNoteEditing);
+    projectInfoNoteCancelBtn?.classList.toggle("hidden", !projectInfoNoteEditing);
+    if (projectInfoNoteEditing) {
+      renderProjectInfoNoteView();
+      if (ensureProjectInfoEditor()) {
+        syncProjectInfoNoteEditor();
+        try {
+          projectInfoQuill.focus();
+        } catch (_err) {}
+      }
+      projectInfoNoteView?.classList.add("hidden");
+      projectInfoNoteEmpty?.classList.add("hidden");
+      return;
+    }
+    renderProjectInfoNoteView();
+  }
+
+  function switchProjectInfoTab(tab) {
+    const filesActive = tab === "files";
+    projectInfoPanelFiles?.classList.toggle("hidden", !filesActive);
+    projectInfoPanelNote?.classList.toggle("hidden", filesActive);
+    projectInfoTabFiles?.classList.toggle("is-active", filesActive);
+    projectInfoTabNote?.classList.toggle("is-active", !filesActive);
+    if (!filesActive) {
+      setProjectInfoNoteEditing(false);
+    }
+  }
+
+  function openProjectInfoDialog() {
+    const p = getActiveProject();
+    if (!p) {
+      setProjectMessage("请先选择程序");
+      return;
+    }
+    currentProjectInfoId = p.id;
+    currentProjectInfoNoteHTML = "";
+    setProjectInfoInlineMessage(projectInfoUploadMsg, "");
+    setProjectInfoInlineMessage(projectInfoNoteMsg, "");
+    setProjectInfoSelectedFile(null);
+    if (projectInfoFileInput) projectInfoFileInput.value = "";
+    if (projectInfoFileRemark) projectInfoFileRemark.value = "";
+    if (projectInfoSubtitle) projectInfoSubtitle.textContent = `当前程序: ${p.name || p.id} (${p.id})`;
+    setProjectInfoNoteUpdatedAt("");
+    updateProjectInfoSummary([]);
+    renderProjectInfoNoteView();
+    setProjectInfoNoteEditing(false);
+    switchProjectInfoTab("files");
+    loadProjectInfoFiles(p.id);
+    loadProjectInfoNote(p.id);
+    if (projectInfoDialog) openDialog(projectInfoDialog);
+  }
+
+  async function loadProjectInfoFiles(projectId) {
+    if (!projectInfoFilesBody) return;
+    projectInfoFilesBody.innerHTML = "";
+    projectInfoFilesEmpty?.classList.add("hidden");
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/files`, { credentials: "same-origin" });
+      if (!res.ok) {
+        updateProjectInfoSummary([]);
+        projectInfoFilesEmpty?.classList.remove("hidden");
+        return;
+      }
+      const files = await res.json();
+      if (!Array.isArray(files) || files.length === 0) {
+        updateProjectInfoSummary([]);
+        projectInfoFilesEmpty?.classList.remove("hidden");
+        return;
+      }
+      updateProjectInfoSummary(files);
+      files.forEach((f) => {
+        const tr = document.createElement("tr");
+        tr.className = "project-info-file-row divide-x divide-slate-100";
+        const typeToken = getFileTypeToken(f.original || f.name || "");
+        const remark = `${f.remark || ""}`.trim();
+        tr.innerHTML = `
+          <td class="px-5 py-4">
+            <div class="project-info-file-main">
+              <span class="project-info-file-type">${escapeAttr(typeToken)}</span>
+              <div class="min-w-0">
+                <div class="project-info-file-name" title="${escapeAttr(f.original || f.name || "-")}">${escapeAttr(f.original || f.name || "-")}</div>
+                <div class="project-info-file-original">${escapeAttr(f.name || "-")}</div>
+              </div>
+            </div>
+          </td>
+          <td class="px-4 py-4 w-52">
+            <div class="project-info-file-remark${remark ? "" : " is-empty"}">${escapeAttr(remark || "未填写备注")}</div>
+          </td>
+          <td class="px-4 py-4 text-slate-500 text-sm whitespace-nowrap">${formatBytes(f.size)}</td>
+          <td class="px-4 py-4 text-slate-400 text-sm whitespace-nowrap">${formatProjectInfoTime(f.uploaded_at)}</td>
+          <td class="px-4 py-4">
+            <button type="button" data-delete="${escapeAttr(f.name)}" class="project-info-delete-btn">删除</button>
+          </td>`;
+        projectInfoFilesBody.appendChild(tr);
+      });
+      projectInfoFilesBody.querySelectorAll("[data-delete]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const fname = btn.getAttribute("data-delete");
+          if (!window.confirm(`确认删除文件 "${fname}" 吗？`)) return;
+          btn.disabled = true;
+          setProjectInfoInlineMessage(projectInfoUploadMsg, "正在删除文件...", "muted");
+          try {
+            const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/files/${encodeURIComponent(fname)}`, {
+              method: "DELETE",
+              credentials: "same-origin",
+            });
+            if (res.ok) {
+              setProjectInfoInlineMessage(projectInfoUploadMsg, "文件已删除", "success");
+              loadProjectInfoFiles(projectId);
+            } else {
+              const p = await res.json().catch(() => ({}));
+              setProjectInfoInlineMessage(projectInfoUploadMsg, p.error || "删除失败", "error");
+              btn.disabled = false;
+            }
+          } catch (_e) {
+            setProjectInfoInlineMessage(projectInfoUploadMsg, "删除失败", "error");
+            btn.disabled = false;
+          }
+        });
+      });
+    } catch (_e) {
+      updateProjectInfoSummary([]);
+      projectInfoFilesEmpty?.classList.remove("hidden");
+      setProjectInfoInlineMessage(projectInfoUploadMsg, "读取资料列表失败", "error");
+    }
+  }
+
+  function getFileTypeToken(filename) {
+    const name = `${filename || ""}`.trim();
+    const parts = name.split(".");
+    const ext = parts.length > 1 ? parts.pop().toUpperCase() : "";
+    if (!ext) return "FILE";
+    return ext.length > 6 ? ext.slice(0, 6) : ext;
+  }
+
+  async function loadProjectInfoNote(projectId) {
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/info`, { credentials: "same-origin" });
+      if (!res.ok) {
+        currentProjectInfoNoteHTML = "";
+        setProjectInfoNoteUpdatedAt("");
+        renderProjectInfoNoteView();
+        if (projectInfoQuill) syncProjectInfoNoteEditor();
+        return;
+      }
+      const info = await res.json();
+      currentProjectInfoNoteHTML = normalizeProjectInfoNoteHTML(info?.note || "");
+      setProjectInfoNoteUpdatedAt(info?.updated_at || "");
+      renderProjectInfoNoteView();
+      if (projectInfoQuill) {
+        syncProjectInfoNoteEditor();
+      }
+    } catch (_e) {
+      currentProjectInfoNoteHTML = "";
+      setProjectInfoNoteUpdatedAt("");
+      renderProjectInfoNoteView();
+      if (projectInfoQuill) syncProjectInfoNoteEditor();
+    }
+  }
+
+  if (document.getElementById("open-project-info-btn")) {
+    document.getElementById("open-project-info-btn").addEventListener("click", openProjectInfoDialog);
+  }
+
+  if (projectInfoClose && projectInfoDialog) {
+    projectInfoClose.addEventListener("click", () => closeDialog(projectInfoDialog));
+    projectInfoDialog.addEventListener("click", (e) => {
+      const rect = projectInfoDialog.getBoundingClientRect();
+      const inDialog = rect.top <= e.clientY && e.clientY <= rect.top + rect.height &&
+        rect.left <= e.clientX && e.clientX <= rect.left + rect.width;
+      if (!inDialog) closeDialog(projectInfoDialog);
+    });
+  }
+
+  if (projectInfoTabFiles) projectInfoTabFiles.addEventListener("click", () => switchProjectInfoTab("files"));
+  if (projectInfoTabNote) projectInfoTabNote.addEventListener("click", () => switchProjectInfoTab("note"));
+  if (projectInfoNoteEditBtn) projectInfoNoteEditBtn.addEventListener("click", () => setProjectInfoNoteEditing(true));
+  if (projectInfoNoteCancelBtn) {
+    projectInfoNoteCancelBtn.addEventListener("click", () => {
+      setProjectInfoInlineMessage(projectInfoNoteMsg, "");
+      setProjectInfoNoteEditing(false);
+    });
+  }
+
+  if (projectInfoUploadBtn) {
+    projectInfoUploadBtn.addEventListener("click", async () => {
+      if (!currentProjectInfoId) return;
+      const fileInput = projectInfoFileInput;
+      if (!fileInput?.files?.length) {
+        setProjectInfoInlineMessage(projectInfoUploadMsg, "请先选择文件", "error");
+        return;
+      }
+      const file = fileInput.files[0];
+      const remark = projectInfoFileRemark?.value?.trim() || "";
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("remark", remark);
+      projectInfoUploadBtn.disabled = true;
+      projectInfoUploadBtn.textContent = "上传中...";
+      setProjectInfoInlineMessage(projectInfoUploadMsg, "正在上传资料...", "muted");
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectInfoId)}/files/upload`, {
+          method: "POST", body: formData, credentials: "same-origin",
+        });
+        if (res.ok) {
+          if (fileInput) fileInput.value = "";
+          if (projectInfoFileRemark) projectInfoFileRemark.value = "";
+          setProjectInfoSelectedFile(null);
+          setProjectInfoInlineMessage(projectInfoUploadMsg, "上传成功，资料列表已刷新", "success");
+          loadProjectInfoFiles(currentProjectInfoId);
+        } else {
+          const p = await res.json().catch(() => ({}));
+          setProjectInfoInlineMessage(projectInfoUploadMsg, p.error || "上传失败", "error");
+        }
+      } catch (_e) {
+        setProjectInfoInlineMessage(projectInfoUploadMsg, "上传失败", "error");
+      }
+      finally {
+        projectInfoUploadBtn.disabled = false;
+        projectInfoUploadBtn.textContent = "上传到项目资料库";
+      }
+    });
+  }
+
+  // Drag-and-drop for project-info file upload
+  const dropZone = document.getElementById("project-info-drop-zone");
+  if (dropZone && projectInfoFileInput) {
+    dropZone.addEventListener("click", () => projectInfoFileInput.click());
+    dropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropZone.classList.add("is-dragging");
+    });
+    dropZone.addEventListener("dragleave", () => {
+      dropZone.classList.remove("is-dragging");
+    });
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("is-dragging");
+      const files = e.dataTransfer?.files;
+      if (files?.length) {
+        projectInfoFileInput.files = files;
+        setProjectInfoSelectedFile(files[0]);
+        setProjectInfoInlineMessage(projectInfoUploadMsg, "文件已就绪，确认后即可上传", "muted");
+      }
+    });
+    projectInfoFileInput.addEventListener("change", () => {
+      if (projectInfoFileInput.files?.length) {
+        setProjectInfoSelectedFile(projectInfoFileInput.files[0]);
+        setProjectInfoInlineMessage(projectInfoUploadMsg, "文件已选择，可以填写备注后上传", "muted");
+        return;
+      }
+      setProjectInfoSelectedFile(null);
+    });
+  }
+
+  if (projectInfoSaveNoteBtn) {
+    projectInfoSaveNoteBtn.addEventListener("click", async () => {
+      if (!currentProjectInfoId) return;
+      if (!ensureProjectInfoEditor()) {
+        setProjectInfoInlineMessage(projectInfoNoteMsg, "备注编辑器尚未准备完成", "error");
+        return;
+      }
+      const noteHtml = projectInfoQuill.root.innerHTML;
+      projectInfoSaveNoteBtn.disabled = true;
+      projectInfoSaveNoteBtn.textContent = "保存中...";
+      try {
+        const formData = new FormData();
+        formData.append("note", noteHtml);
+        const res = await fetch(`/api/projects/${encodeURIComponent(currentProjectInfoId)}/info`, {
+          method: "POST", body: formData, credentials: "same-origin",
+        });
+        const p = await res.json().catch(() => ({}));
+        if (res.ok) {
+          currentProjectInfoNoteHTML = normalizeProjectInfoNoteHTML(noteHtml);
+          setProjectInfoInlineMessage(projectInfoNoteMsg, p.message || "备注已保存", "success");
+          renderProjectInfoNoteView();
+          setProjectInfoNoteEditing(false);
+          loadProjectInfoNote(currentProjectInfoId);
+          setTimeout(() => {
+            setProjectInfoInlineMessage(projectInfoNoteMsg, "");
+          }, 3000);
+        } else {
+          setProjectInfoInlineMessage(projectInfoNoteMsg, p.error || "保存失败", "error");
+        }
+      } catch (_e) {
+        setProjectInfoInlineMessage(projectInfoNoteMsg, "保存失败", "error");
+      } finally {
+        projectInfoSaveNoteBtn.disabled = false;
+        projectInfoSaveNoteBtn.textContent = "保存备注";
+      }
+    });
+  }
 })();
