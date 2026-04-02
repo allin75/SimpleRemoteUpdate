@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/mail"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	"golang.org/x/sys/windows"
 )
 
 func main() {
@@ -130,6 +132,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/api/self-update", a.requireAuth(a.handleSelfUpdate))
 	mux.HandleFunc("/api/config", a.requireAuth(a.handleConfigAPI))
 	mux.HandleFunc("/api/notify/test", a.requireAuth(a.handleNotifyTestAPI))
+	mux.HandleFunc("/api/system/disk-usage", a.requireAuth(a.handleDiskUsage))
 	mux.HandleFunc("/api/projects", a.requireAuth(a.handleProjectsAPI))
 	mux.HandleFunc("/api/projects/", a.requireAuth(a.handleProjectItemAPI))
 	mux.HandleFunc("/api/deployments/", a.requireAuth(a.handleDeploymentAPIs))
@@ -921,6 +924,81 @@ func (a *App) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("未知配置保存范围: %s", scope)})
 	}
+}
+
+func (a *App) handleDiskUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cfg := a.currentConfig()
+	backupDir := cfg.BackupDir
+
+	// Convert to absolute path for Windows API
+	absBackupDir, err := filepath.Abs(backupDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": fmt.Sprintf("获取绝对路径失败: %v", err)})
+		return
+	}
+
+	// Get backup directory size
+	backupSize, err := dirSize(absBackupDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": fmt.Sprintf("读取备份目录大小失败: %v", err)})
+		return
+	}
+
+	// Get disk space info using Windows syscall
+	var freeBytesAvailable, totalBytes, totalFreeBytes uint64
+	pathPtr, err := windows.UTF16PtrFromString(absBackupDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": fmt.Sprintf("路径转换失败: %v", err)})
+		return
+	}
+	err = windows.GetDiskFreeSpaceEx(pathPtr, &freeBytesAvailable, &totalBytes, &totalFreeBytes)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": fmt.Sprintf("获取磁盘空间失败: %v", err)})
+		return
+	}
+
+	diskTotal := int64(totalBytes)
+	diskFree := int64(freeBytesAvailable)
+	percent := 0.0
+	if diskTotal > 0 {
+		percent = float64(backupSize) / float64(diskTotal) * 100
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                true,
+		"backup_dir":        backupDir,
+		"backup_size":       backupSize,
+		"backup_size_human": formatBytes(backupSize),
+		"disk_total":        diskTotal,
+		"disk_total_human":  formatBytes(diskTotal),
+		"disk_free":         diskFree,
+		"disk_free_human":   formatBytes(diskFree),
+		"percent":           mathRound(percent, 1),
+	})
+}
+
+func formatBytes(n int64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+	value := float64(n)
+	exp := 0
+	for value >= 1024 && exp < len(units)-1 {
+		value /= 1024
+		exp++
+	}
+	if exp == 0 {
+		return fmt.Sprintf("%d B", n)
+	}
+	return fmt.Sprintf("%.1f %s", value, units[exp])
+}
+
+func mathRound(x float64, precision int) float64 {
+	scale := math.Pow(10, float64(precision))
+	return math.Round(x*scale) / scale
 }
 
 func (a *App) handleNotifyTestAPI(w http.ResponseWriter, r *http.Request) {
@@ -3085,6 +3163,11 @@ func startSelfUpdateServiceWithRetry(opts selfUpdateWorkerOptions) error {
 	var lastErr error
 	for attempt := 1; attempt <= selfUpdateRestartRetryTimes; attempt++ {
 		lastErr = startService(opts.ServiceName, selfUpdateServiceOpTimeout)
+		if lastErr != nil {
+			if fallbackErr := startServiceViaNSSM(opts.ServiceName, filepath.Dir(opts.TargetPath)); fallbackErr == nil {
+				lastErr = nil
+			}
+		}
 		if lastErr == nil {
 			if attempt > 1 {
 				appendSelfUpdateLog(opts.LogFile, "[self-update] service restart succeeded on retry %d/%d", attempt, selfUpdateRestartRetryTimes)
@@ -3099,16 +3182,28 @@ func startSelfUpdateServiceWithRetry(opts selfUpdateWorkerOptions) error {
 	return fmt.Errorf("服务重启失败，重试 %d 次后仍失败: %w", selfUpdateRestartRetryTimes, lastErr)
 }
 
+func startServiceViaNSSM(serviceName, targetDir string) error {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return errors.New("service name is empty")
+	}
+	nssmPath, err := resolveNSSMPath("", strings.TrimSpace(targetDir))
+	if err != nil {
+		return err
+	}
+	return runNSSMCommand(nssmPath, "start", serviceName)
+}
+
 func updateSelfUpdateResult(opts selfUpdateWorkerOptions, status, errMsg string, newSize int64) error {
 	if opts.DeploymentsFile == "" || opts.DeploymentID == "" {
 		return nil
 	}
 	var lastErr error
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 100; i++ {
 		store, err := newDeploymentStore(opts.DeploymentsFile)
 		if err != nil {
 			lastErr = err
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 		now := time.Now()
@@ -3131,7 +3226,7 @@ func updateSelfUpdateResult(opts selfUpdateWorkerOptions, status, errMsg string,
 			return nil
 		}
 		lastErr = err
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 	return lastErr
 }

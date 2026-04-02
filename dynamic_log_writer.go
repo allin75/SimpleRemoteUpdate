@@ -62,4 +62,3 @@ func (w *dynamicLogWriter) Close() error {
 }
 
 var _ io.Writer = (*dynamicLogWriter)(nil)
-

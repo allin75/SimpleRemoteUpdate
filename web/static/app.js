@@ -90,6 +90,10 @@
   const projectInfoNoteCancelBtn = document.getElementById("project-info-note-cancel-btn");
   const projectInfoFileCount = document.getElementById("project-info-file-count");
   const projectInfoTotalSize = document.getElementById("project-info-total-size");
+
+  const diskUsageHeaderEl = document.getElementById("disk-usage-header");
+  const diskUsageDialogEl = document.getElementById("disk-usage-dialog");
+  let diskUsageInterval = null;
   const projectInfoNoteUpdated = document.getElementById("project-info-note-updated");
   const projectInfoNoteUpdatedSide = document.getElementById("project-info-note-updated-side");
   const projectInfoSelectedFile = document.getElementById("project-info-selected-file");
@@ -1528,6 +1532,7 @@
     openSystemConfigBtn.addEventListener("click", () => {
       setSystemMessage("");
       openDialog(systemConfigDialog);
+      pollDiskUsage();
     });
   }
 
@@ -2071,4 +2076,36 @@
       }
     });
   }
+
+  // ── disk usage polling ───────────────────────────────────────────────────
+  async function pollDiskUsage() {
+    try {
+      const res = await fetch("/api/system/disk-usage", { credentials: "same-origin" });
+      if (!res.ok) throw new Error("fetch failed");
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "api error");
+      const headerText = `磁盘: ${data.backup_size_human} / ${data.disk_total_human}`;
+      const dialogText = `备份占用: ${data.backup_size_human} / 磁盘总计 ${data.disk_total_human} (${data.percent}%)`;
+      setText(diskUsageHeaderEl, headerText);
+      setText(diskUsageDialogEl, dialogText);
+    } catch (_e) {
+      setText(diskUsageHeaderEl, "磁盘: 未知");
+      setText(diskUsageDialogEl, "备份占用: 获取失败");
+    }
+  }
+
+  function startDiskUsagePolling() {
+    if (diskUsageInterval) return;
+    pollDiskUsage();
+    diskUsageInterval = setInterval(pollDiskUsage, 30000);
+  }
+
+  function stopDiskUsagePolling() {
+    if (!diskUsageInterval) return;
+    clearInterval(diskUsageInterval);
+    diskUsageInterval = null;
+  }
+
+  // start header polling immediately (runs always)
+  startDiskUsagePolling();
 })();

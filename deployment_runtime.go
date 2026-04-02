@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -603,28 +604,19 @@ func (a *App) runSelfUpdate(id string) {
 		args = append(args, "--service-name", selfUpdateServiceName)
 	}
 
-	procAttr := &os.ProcAttr{
-		Dir: workDir,
-		Files: []*os.File{
-			os.Stdin,
-			os.Stdout,
-			os.Stderr,
-		},
-		Sys: selfUpdateWorkerSysProcAttr(),
-	}
-	proc, err := os.StartProcess(workerPath, args, procAttr)
-	if err != nil && procAttr.Sys != nil {
-		a.publish(id, "warn", "使用 breakaway 模式启动自更新工作进程失败，回退普通启动: %v", err)
-		procAttr.Sys = nil
-		proc, err = os.StartProcess(workerPath, args, procAttr)
-	}
-	if err != nil {
-		finish("failed", fmt.Errorf("启动自更新工作进程失败: %w", err), changed, backupPath)
-		a.publish(id, "error", "启动自更新工作进程失败: %v", err)
+	launcherArgs := []string{"/c", "start", "", workerPath}
+	launcherArgs = append(launcherArgs, args[1:]...)
+	cmd := exec.Command("cmd", launcherArgs...)
+	cmd.Dir = workDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		finish("failed", fmt.Errorf("start self-update worker failed: %w", err), changed, backupPath)
+		a.publish(id, "error", "start self-update worker failed: %v", err)
 		return
 	}
 
-	a.publishProgress(id, "info", "切换新版本", 90, "自更新工作进程已启动，PID=%d", proc.Pid)
+	a.publishProgress(id, "info", "switching", 90, "self-update worker launched via cmd start")
 	a.publishProgress(id, "warn", "切换新版本", 96, "当前进程即将退出，替换完成后将自动重启")
 	time.Sleep(1200 * time.Millisecond)
 	os.Exit(0)
@@ -632,6 +624,9 @@ func (a *App) runSelfUpdate(id string) {
 
 func resolveSelfUpdateServiceName(cfg Config) string {
 	if v := strings.TrimSpace(cfg.SelfUpdateServiceName); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(cfg.ServiceName); v != "" {
 		return v
 	}
 	for _, key := range []string{"NSSM_SERVICE_NAME", "SERVICE_NAME", "UPDATER_SERVICE_NAME"} {

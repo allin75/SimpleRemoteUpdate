@@ -771,3 +771,24 @@ func normalizeRelPath(s string) string {
 	}
 	return s
 }
+
+func dirSize(path string) (int64, error) {
+	var size int64
+	err := filepath.WalkDir(path, func(_ string, info os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			fileInfo, err := info.Info()
+			if err != nil {
+				return err
+			}
+			size += fileInfo.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return size, nil
+}

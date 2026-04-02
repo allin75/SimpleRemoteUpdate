@@ -45,4 +45,3 @@ func withRecover(next http.Handler, logger *slog.Logger) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-

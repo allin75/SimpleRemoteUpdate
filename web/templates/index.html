@@ -12,7 +12,7 @@
     <header class="bg-white rounded-xl shadow p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
       <div>
         <h1 class="text-2xl font-semibold">远程更新控制台</h1>
-        <p id="runtime-summary" class="text-sm text-slate-500">服务: {{.ServiceName}} | 目录: {{.TargetDir}} | 当前版本: {{.CurrentVersion}}</p>
+        <p id="runtime-summary" class="text-sm text-slate-500">服务: {{.ServiceName}} | 目录: {{.TargetDir}} | 当前版本: {{.CurrentVersion}} | <span id="disk-usage-header">磁盘: 加载中...</span></p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <a href="{{.StandardDeployPath}}" class="px-4 py-2 rounded border text-sm {{if .InitialDeployPage}}border-slate-300 hover:bg-slate-50{{else}}border-sky-300 bg-sky-50 text-sky-700{{end}}">常规部署</a>
@@ -557,6 +557,7 @@
         backup_dir
         <input name="backup_dir" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
       </label>
+      <p id="disk-usage-dialog" class="text-xs text-slate-500 md:col-span-2 xl:col-span-3">备份占用: 加载中...</p>
       <label class="block text-sm">
         deployments_file
         <input name="deployments_file" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
