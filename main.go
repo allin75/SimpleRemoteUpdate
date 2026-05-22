@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,7 +18,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1149,6 +1152,7 @@ func (a *App) handleSaveProjectConfig(w http.ResponseWriter, r *http.Request) {
 	project.ServiceStartType = normalizeServiceStartType(r.FormValue("service_start_type"))
 	project.ReverseProxyEnabled = parseBoolFormValue(r.FormValue("reverse_proxy_enabled"))
 	project.ReverseProxyBindIP = normalizeReverseProxyBindIP(r.FormValue("reverse_proxy_bind_ip"))
+	project.RuntimeLogDir = strings.TrimSpace(r.FormValue("runtime_log_dir"))
 	proxyRules, parseErr := parseReverseProxyRulesFormValue(r.FormValue("reverse_proxy_rules_json"))
 	if parseErr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": parseErr.Error()})
@@ -1263,6 +1267,7 @@ func (a *App) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
 		ServiceStartType:      normalizeServiceStartType(r.FormValue("service_start_type")),
 		ReverseProxyEnabled:   parseBoolFormValue(r.FormValue("reverse_proxy_enabled")),
 		ReverseProxyBindIP:    normalizeReverseProxyBindIP(r.FormValue("reverse_proxy_bind_ip")),
+		RuntimeLogDir:         strings.TrimSpace(r.FormValue("runtime_log_dir")),
 		MaxUploadMB:           maxUploadMB,
 		BackupIgnore:          splitLinesTrim(r.FormValue("backup_ignore_text")),
 		ReplaceIgnore:         splitLinesTrim(r.FormValue("replace_ignore_text")),
@@ -1344,6 +1349,26 @@ func (a *App) handleProjectItemAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(segments) == 2 && segments[1] == "files" {
 		a.handleProjectFilesAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) == 2 && segments[1] == "runtime-log-candidates" {
+		a.handleProjectRuntimeLogCandidatesAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) == 2 && segments[1] == "runtime-logs" {
+		a.handleProjectRuntimeLogsAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) == 3 && segments[1] == "runtime-logs" && segments[2] == "search" {
+		a.handleProjectRuntimeLogSearchAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) == 3 && segments[1] == "runtime-logs" && segments[2] == "fixed-dir" {
+		a.handleProjectRuntimeLogFixedDirAPI(w, r, segments[0])
+		return
+	}
+	if len(segments) == 3 && segments[1] == "runtime-logs" && segments[2] == "download" {
+		a.handleProjectRuntimeLogDownloadAPI(w, r, segments[0])
 		return
 	}
 	if len(segments) == 3 && segments[1] == "files" && segments[2] == "upload" {
@@ -1486,6 +1511,245 @@ func (a *App) handleProjectFilesAPI(w http.ResponseWriter, r *http.Request, proj
 	writeJSON(w, http.StatusOK, files)
 }
 
+func (a *App) handleProjectRuntimeLogCandidatesAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	project, ok := a.getManagedProject(projectID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	candidates, err := discoverRuntimeLogCandidates(project)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"fixed_dir":   strings.TrimSpace(project.RuntimeLogDir),
+		"candidates":  candidates,
+		"target_dir":  project.TargetDir,
+		"project_id":  project.ID,
+		"project_name": project.Name,
+	})
+}
+
+func (a *App) handleProjectRuntimeLogsAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	project, ok := a.getManagedProject(projectID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	dirToken := strings.TrimSpace(r.URL.Query().Get("dir"))
+	fileToken := strings.TrimSpace(r.URL.Query().Get("file"))
+	if dirToken == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir 不能为空"})
+		return
+	}
+
+	dirPath, relDir, err := resolveRuntimeLogDirectoryByToken(project, dirToken)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if fileToken == "" {
+		files, err := listRuntimeLogFiles(dirPath, relDir)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("读取日志文件列表失败: %v", err)})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"dir":        relDir,
+			"fixed_dir":  strings.TrimSpace(project.RuntimeLogDir),
+			"files":      files,
+			"download_limit_bytes": runtimeLogDownloadLimitBytes,
+		})
+		return
+	}
+
+	filePath, relFile, info, err := resolveRuntimeLogFile(project, dirPath, relDir, fileToken)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	lines := parseRuntimeLogLines(r.URL.Query().Get("lines"))
+	cursor := parseRuntimeLogCursor(r.URL.Query().Get("cursor"))
+	chunk, err := readRuntimeLogChunk(filePath, cursor, lines)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("读取日志内容失败: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dir":                 relDir,
+		"file":                relFile,
+		"size":                info.Size(),
+		"downloadable":        isRuntimeLogDownloadAllowed(info.Size()),
+		"modified_at":         info.ModTime().Format("2006-01-02T15:04:05"),
+		"content":             chunk.Content,
+		"next_cursor":         chunk.NextCursor,
+		"has_more":            chunk.HasMore,
+		"lines":               lines,
+		"download_limit_bytes": runtimeLogDownloadLimitBytes,
+	})
+}
+
+func (a *App) handleProjectRuntimeLogFixedDirAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := parseRequestForm(r); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求参数解析失败"})
+		return
+	}
+	dirToken := strings.TrimSpace(r.FormValue("runtime_log_dir"))
+
+	oldCfg := a.currentConfig()
+	newCfg := oldCfg
+	idx := -1
+	for i := range newCfg.Projects {
+		if newCfg.Projects[i].ID == projectID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+
+	project := newCfg.Projects[idx]
+	if dirToken != "" {
+		dirPath, relDir, err := resolveRuntimeLogDirectoryByToken(project, dirToken)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if relDir == "." {
+			project.RuntimeLogDir = "."
+		} else {
+			project.RuntimeLogDir = filepath.ToSlash(relDir)
+		}
+		if _, err := os.Stat(dirPath); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("日志目录不可用: %v", err)})
+			return
+		}
+	} else {
+		project.RuntimeLogDir = ""
+	}
+	newCfg.Projects[idx] = project
+	restartFields, err := a.applyConfigChanges(w, r, oldCfg, newCfg)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	finalCfg := a.currentConfig()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                true,
+		"message":           "运行日志目录已保存",
+		"restart_needed":    len(restartFields) > 0,
+		"restart_fields":    restartFields,
+		"active_project_id": projectID,
+		"config":            configSnapshot(finalCfg),
+	})
+}
+
+func (a *App) handleProjectRuntimeLogSearchAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	project, ok := a.getManagedProject(projectID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	dirToken := strings.TrimSpace(r.URL.Query().Get("dir"))
+	fileToken := strings.TrimSpace(r.URL.Query().Get("file"))
+	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
+	if dirToken == "" || fileToken == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir 和 file 不能为空"})
+		return
+	}
+	if keyword == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "keyword 不能为空"})
+		return
+	}
+
+	dirPath, relDir, err := resolveRuntimeLogDirectoryByToken(project, dirToken)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	filePath, relFile, _, err := resolveRuntimeLogFile(project, dirPath, relDir, fileToken)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	result, err := searchRuntimeLogFile(filePath, keyword, 50)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("搜索日志失败: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"file":      relFile,
+		"keyword":   keyword,
+		"matches":   result.Matches,
+		"total":     result.Total,
+		"truncated": result.Truncated,
+	})
+}
+
+func (a *App) handleProjectRuntimeLogDownloadAPI(w http.ResponseWriter, r *http.Request, projectID string) {
+	project, ok := a.getManagedProject(projectID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": fmt.Sprintf("程序不存在: %s", projectID)})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	dirToken := strings.TrimSpace(r.URL.Query().Get("dir"))
+	fileToken := strings.TrimSpace(r.URL.Query().Get("file"))
+	if dirToken == "" || fileToken == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir 和 file 不能为空"})
+		return
+	}
+	dirPath, relDir, err := resolveRuntimeLogDirectoryByToken(project, dirToken)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	filePath, relFile, info, err := resolveRuntimeLogFile(project, dirPath, relDir, fileToken)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if !isRuntimeLogDownloadAllowed(info.Size()) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "日志文件超过 50MB，仅支持在线查看"})
+		return
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("打开日志文件失败: %v", err)})
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(relFile)))
+	http.ServeContent(w, r, filepath.Base(relFile), info.ModTime(), f)
+}
+
 func (a *App) handleProjectFilesUploadAPI(w http.ResponseWriter, r *http.Request, projectID string) {
 	cfg := a.currentConfig()
 	if _, ok := findProjectByID(cfg.Projects, projectID); !ok {
@@ -1575,6 +1839,7 @@ func configSnapshot(cfg Config) map[string]any {
 		"reverse_proxy_enabled":      dp.ReverseProxyEnabled,
 		"reverse_proxy_bind_ip":      dp.ReverseProxyBindIP,
 		"reverse_proxy_rules":        dp.ReverseProxyRules,
+		"runtime_log_dir":            dp.RuntimeLogDir,
 		"backup_ignore_text":         strings.Join(dp.BackupIgnore, "\n"),
 		"replace_ignore_text":        strings.Join(dp.ReplaceIgnore, "\n"),
 		"max_upload_mb":              dp.MaxUploadMB,
@@ -2227,6 +2492,11 @@ func validateRuntimeConfig(cfg Config) error {
 			}
 			if err := validateServiceRestartSpec(effectiveServiceRestartSpec(p)); err != nil {
 				return fmt.Errorf("projects(%s).%s", p.ID, err.Error())
+			}
+		}
+		if strings.TrimSpace(p.RuntimeLogDir) != "" {
+			if _, _, err := resolveRuntimeLogDir(p); err != nil {
+				return fmt.Errorf("projects(%s).runtime_log_dir 非法: %v", p.ID, err)
 			}
 		}
 	}
@@ -3263,6 +3533,61 @@ type projectFileMeta struct {
 	UploadedAt string `json:"uploaded_at"`
 }
 
+type runtimeLogCandidate struct {
+	RelPath      string `json:"rel_path"`
+	DisplayPath  string `json:"display_path"`
+	Score        int    `json:"score"`
+	FileCount    int    `json:"file_count"`
+	LatestFile   string `json:"latest_file,omitempty"`
+	Fixed        bool   `json:"fixed"`
+}
+
+type runtimeLogFileEntry struct {
+	Name         string `json:"name"`
+	RelPath      string `json:"rel_path"`
+	DisplayPath  string `json:"display_path"`
+	Size         int64  `json:"size"`
+	ModifiedAt   string `json:"modified_at"`
+	Downloadable bool   `json:"downloadable"`
+}
+
+type runtimeLogChunk struct {
+	Content    string `json:"content"`
+	NextCursor int64  `json:"next_cursor"`
+	HasMore    bool   `json:"has_more"`
+}
+
+type runtimeLogSearchMatch struct {
+	LineNumber int    `json:"line_number"`
+	LineText   string `json:"line_text"`
+}
+
+type runtimeLogSearchResult struct {
+	Matches   []runtimeLogSearchMatch `json:"matches"`
+	Total     int                     `json:"total"`
+	Truncated bool                    `json:"truncated"`
+}
+
+const (
+	runtimeLogDownloadLimitBytes = 50 * 1024 * 1024
+	runtimeLogMaxScanDepth       = 4
+	runtimeLogMaxDirsVisited     = 300
+	runtimeLogDiscoveryTimeout   = 3 * time.Second
+	runtimeLogChunkBytes         = 256 * 1024
+	runtimeLogMaxLineChars       = 16 * 1024
+)
+
+var (
+	runtimeLogDirNameHints = []string{"log", "logs", "logger", "trace", "runtime"}
+	runtimeLogExtAllowlist = map[string]struct{}{
+		".log": {},
+		".txt": {},
+		".out": {},
+		".err": {},
+	}
+	runtimeLogRotatePattern = regexp.MustCompile(`(?i)\.log(\.\d+)?$`)
+)
+
 func (a *App) projectBaseDir(projectID string) string {
 	// Use work_dir as the parent, not target_dir — keeps project data in the updater's own space
 	cfg := a.currentConfig()
@@ -3390,4 +3715,488 @@ func (a *App) deleteProjectFile(projectID, filename string) error {
 	filePath := filepath.Join(a.projectFilesDir(projectID), filename)
 	_ = os.Remove(metaPath)
 	return os.Remove(filePath)
+}
+
+func (a *App) getManagedProject(projectID string) (ManagedProject, bool) {
+	cfg := a.currentConfig()
+	return findProjectByID(cfg.Projects, projectID)
+}
+
+func resolveRuntimeLogDir(project ManagedProject) (string, string, error) {
+	targetDir := strings.TrimSpace(project.TargetDir)
+	if targetDir == "" {
+		return "", "", errors.New("target_dir 不能为空")
+	}
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		return "", "", fmt.Errorf("解析 target_dir 失败: %w", err)
+	}
+	relSetting := strings.TrimSpace(project.RuntimeLogDir)
+	if relSetting == "" {
+		return absTarget, ".", nil
+	}
+	return resolveDirWithinBase(absTarget, relSetting)
+}
+
+func resolveRuntimeLogDirectoryByToken(project ManagedProject, token string) (string, string, error) {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		return "", "", errors.New("日志目录不能为空")
+	}
+	if strings.EqualFold(trimmed, "__fixed__") {
+		if strings.TrimSpace(project.RuntimeLogDir) == "" {
+			return "", "", errors.New("当前程序未固定运行日志目录")
+		}
+		return resolveRuntimeLogDir(project)
+	}
+	targetDir := strings.TrimSpace(project.TargetDir)
+	if targetDir == "" {
+		return "", "", errors.New("target_dir 不能为空")
+	}
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		return "", "", fmt.Errorf("解析 target_dir 失败: %w", err)
+	}
+	return resolveDirWithinBase(absTarget, trimmed)
+}
+
+func resolveDirWithinBase(absBase, rel string) (string, string, error) {
+	base := filepath.Clean(absBase)
+	cleanRel := filepath.Clean(filepath.FromSlash(strings.TrimSpace(rel)))
+	if cleanRel == "." {
+		return base, ".", nil
+	}
+	candidate := filepath.Clean(filepath.Join(base, cleanRel))
+	if !pathWithinBase(base, candidate) {
+		return "", "", errors.New("日志目录超出当前项目 target_dir 范围")
+	}
+	info, err := os.Stat(candidate)
+	if err != nil {
+		return "", "", fmt.Errorf("日志目录不存在: %w", err)
+	}
+	if !info.IsDir() {
+		return "", "", errors.New("指定路径不是目录")
+	}
+	relPath, err := filepath.Rel(base, candidate)
+	if err != nil {
+		return "", "", fmt.Errorf("计算日志目录相对路径失败: %w", err)
+	}
+	return candidate, filepath.ToSlash(relPath), nil
+}
+
+func resolveRuntimeLogFile(project ManagedProject, dirPath, relDir, fileToken string) (string, string, fs.FileInfo, error) {
+	cleanName := filepath.Clean(filepath.FromSlash(strings.TrimSpace(fileToken)))
+	if cleanName == "" || cleanName == "." {
+		return "", "", nil, errors.New("日志文件不能为空")
+	}
+	if strings.HasPrefix(cleanName, "..") {
+		return "", "", nil, errors.New("日志文件路径非法")
+	}
+	if relDir != "." {
+		normalizedDir := filepath.Clean(filepath.FromSlash(relDir))
+		if cleanName == normalizedDir {
+			return "", "", nil, errors.New("日志文件路径指向目录")
+		}
+		prefix := normalizedDir + string(filepath.Separator)
+		if strings.HasPrefix(cleanName, prefix) {
+			cleanName = strings.TrimPrefix(cleanName, prefix)
+		}
+	}
+	targetPath := filepath.Clean(filepath.Join(dirPath, cleanName))
+	if !pathWithinBase(dirPath, targetPath) {
+		return "", "", nil, errors.New("日志文件超出目录范围")
+	}
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("日志文件不存在: %w", err)
+	}
+	if info.IsDir() {
+		return "", "", nil, errors.New("日志文件路径指向目录")
+	}
+	if !isAllowedRuntimeLogFilename(filepath.Base(targetPath)) {
+		return "", "", nil, errors.New("当前文件类型不在允许的日志范围内")
+	}
+	joined := cleanName
+	if relDir != "." {
+		joined = filepath.ToSlash(filepath.Join(relDir, cleanName))
+	}
+	return targetPath, filepath.ToSlash(joined), info, nil
+}
+
+func discoverRuntimeLogCandidates(project ManagedProject) ([]runtimeLogCandidate, error) {
+	if strings.TrimSpace(project.RuntimeLogDir) != "" {
+		absDir, relDir, err := resolveRuntimeLogDir(project)
+		if err != nil {
+			return nil, err
+		}
+		candidate, err := buildRuntimeLogCandidate(absDir, relDir, true)
+		if err != nil {
+			return nil, err
+		}
+		return []runtimeLogCandidate{candidate}, nil
+	}
+
+	targetDir := strings.TrimSpace(project.TargetDir)
+	if targetDir == "" {
+		return nil, errors.New("target_dir 不能为空")
+	}
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		return nil, fmt.Errorf("解析 target_dir 失败: %w", err)
+	}
+	base := filepath.Clean(absTarget)
+	deadline := time.Now().Add(runtimeLogDiscoveryTimeout)
+	visited := 0
+	candidates := make(map[string]runtimeLogCandidate)
+
+	walkErr := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if time.Now().After(deadline) || visited >= runtimeLogMaxDirsVisited {
+			return fs.SkipAll
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		visited++
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return nil
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(filepath.ToSlash(rel), "/") + 1
+		}
+		if depth > runtimeLogMaxScanDepth {
+			return fs.SkipDir
+		}
+		candidate, buildErr := buildRuntimeLogCandidate(path, filepath.ToSlash(rel), false)
+		if buildErr == nil && candidate.FileCount > 0 && candidate.Score > 0 {
+			candidates[candidate.RelPath] = candidate
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
+		return nil, walkErr
+	}
+
+	out := make([]runtimeLogCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, candidate)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score == out[j].Score {
+			return out[i].RelPath < out[j].RelPath
+		}
+		return out[i].Score > out[j].Score
+	})
+	if len(out) > 5 {
+		out = out[:5]
+	}
+	return out, nil
+}
+
+func buildRuntimeLogCandidate(absDir, relDir string, fixed bool) (runtimeLogCandidate, error) {
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return runtimeLogCandidate{}, err
+	}
+	displayPath := relDir
+	if displayPath == "." {
+		displayPath = "."
+	}
+	candidate := runtimeLogCandidate{
+		RelPath:     filepath.ToSlash(relDir),
+		DisplayPath: filepath.ToSlash(displayPath),
+		Fixed:       fixed,
+	}
+	dirScore := 0
+	nameLower := strings.ToLower(filepath.Base(absDir))
+	for _, hint := range runtimeLogDirNameHints {
+		if strings.Contains(nameLower, hint) {
+			dirScore += 15
+			break
+		}
+	}
+	var latestTime time.Time
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !isAllowedRuntimeLogFilename(entry.Name()) {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		candidate.FileCount++
+		dirScore += 10
+		if runtimeLogRotatePattern.MatchString(entry.Name()) {
+			dirScore += 6
+		}
+		if time.Since(info.ModTime()) <= 7*24*time.Hour {
+			dirScore += 4
+		}
+		if latestTime.IsZero() || info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+			candidate.LatestFile = entry.Name()
+		}
+	}
+	candidate.Score = dirScore
+	return candidate, nil
+}
+
+func listRuntimeLogFiles(absDir, relDir string) ([]runtimeLogFileEntry, error) {
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]runtimeLogFileEntry, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !isAllowedRuntimeLogFilename(entry.Name()) {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		files = append(files, runtimeLogFileEntry{
+			Name:         entry.Name(),
+			RelPath:      entry.Name(),
+			DisplayPath:  entry.Name(),
+			Size:         info.Size(),
+			ModifiedAt:   info.ModTime().Format("2006-01-02T15:04:05"),
+			Downloadable: isRuntimeLogDownloadAllowed(info.Size()),
+		})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].ModifiedAt == files[j].ModifiedAt {
+			return files[i].Name < files[j].Name
+		}
+		return files[i].ModifiedAt > files[j].ModifiedAt
+	})
+	return files, nil
+}
+
+func readRuntimeLogChunk(filePath string, cursor int64, lines int) (runtimeLogChunk, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return runtimeLogChunk{}, err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return runtimeLogChunk{}, err
+	}
+	size := info.Size()
+	end := size
+	if cursor >= 0 && cursor < size {
+		end = cursor
+	}
+	if end < 0 {
+		end = 0
+	}
+	targetLines := lines
+	if targetLines != 500 {
+		targetLines = 200
+	}
+	if end == 0 {
+		return runtimeLogChunk{Content: "", NextCursor: 0, HasMore: false}, nil
+	}
+
+	buf := make([]byte, 0, runtimeLogChunkBytes)
+	start := end
+	for start > 0 {
+		readStart := start - runtimeLogChunkBytes
+		if readStart < 0 {
+			readStart = 0
+		}
+		partSize := start - readStart
+		part := make([]byte, partSize)
+		if _, err := f.ReadAt(part, readStart); err != nil && !errors.Is(err, io.EOF) {
+			return runtimeLogChunk{}, err
+		}
+		buf = append(part, buf...)
+		start = readStart
+		if countLogicalLines(buf) > targetLines+20 || start == 0 {
+			break
+		}
+	}
+
+	content, nextCursor, hasMore := trimRuntimeLogChunk(buf, start, targetLines)
+	return runtimeLogChunk{
+		Content:    content,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	}, nil
+}
+
+func trimRuntimeLogChunk(buf []byte, startOffset int64, targetLines int) (string, int64, bool) {
+	if len(buf) == 0 {
+		return "", 0, false
+	}
+	lines := splitAndTrimRuntimeLines(string(buf))
+	if len(lines) == 0 {
+		return "", 0, startOffset > 0
+	}
+	startLine := 0
+	hasMore := startOffset > 0
+	if len(lines) > targetLines {
+		startLine = len(lines) - targetLines
+		hasMore = true
+	}
+	selected := lines[startLine:]
+	for i := range selected {
+		if len(selected[i]) > runtimeLogMaxLineChars {
+			selected[i] = selected[i][:runtimeLogMaxLineChars] + " ...[truncated]"
+		}
+	}
+	content := strings.Join(selected, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	nextCursor := int64(0)
+	if hasMore {
+		prefix := strings.Join(lines[:startLine], "\n")
+		nextCursor = startOffset + int64(len(prefix))
+		if prefix != "" {
+			nextCursor++
+		}
+		if nextCursor < 0 {
+			nextCursor = 0
+		}
+	}
+	return content, nextCursor, hasMore
+}
+
+func splitAndTrimRuntimeLines(content string) []string {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized = strings.TrimSuffix(normalized, "\n")
+	if normalized == "" {
+		return nil
+	}
+	return strings.Split(normalized, "\n")
+}
+
+func countLogicalLines(buf []byte) int {
+	if len(buf) == 0 {
+		return 0
+	}
+	count := 0
+	for _, b := range buf {
+		if b == '\n' {
+			count++
+		}
+	}
+	return count + 1
+}
+
+func isRuntimeLogDownloadAllowed(size int64) bool {
+	return size <= runtimeLogDownloadLimitBytes
+}
+
+func searchRuntimeLogFile(filePath, keyword string, limit int) (runtimeLogSearchResult, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return runtimeLogSearchResult{}, err
+	}
+	defer f.Close()
+
+	if limit <= 0 {
+		limit = 50
+	}
+	needle := strings.ToLower(strings.TrimSpace(keyword))
+	if needle == "" {
+		return runtimeLogSearchResult{}, errors.New("keyword 不能为空")
+	}
+
+	reader := bufio.NewReaderSize(f, 64*1024)
+	result := runtimeLogSearchResult{
+		Matches: make([]runtimeLogSearchMatch, 0, minInt(limit, 50)),
+	}
+	lineNumber := 0
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			lineNumber++
+			trimmed := strings.TrimRight(line, "\r\n")
+			if strings.Contains(strings.ToLower(trimmed), needle) {
+				result.Total++
+				if len(result.Matches) < limit {
+					result.Matches = append(result.Matches, runtimeLogSearchMatch{
+						LineNumber: lineNumber,
+						LineText:   truncateRuntimeLogLine(trimmed),
+					})
+				} else {
+					result.Truncated = true
+				}
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return runtimeLogSearchResult{}, err
+		}
+	}
+	return result, nil
+}
+
+func isAllowedRuntimeLogFilename(name string) bool {
+	base := strings.ToLower(strings.TrimSpace(filepath.Base(name)))
+	if base == "" {
+		return false
+	}
+	if _, ok := runtimeLogExtAllowlist[filepath.Ext(base)]; ok {
+		return true
+	}
+	return runtimeLogRotatePattern.MatchString(base)
+}
+
+func parseRuntimeLogLines(raw string) int {
+	if strings.TrimSpace(raw) == "500" {
+		return 500
+	}
+	return 200
+}
+
+func parseRuntimeLogCursor(raw string) int64 {
+	if strings.TrimSpace(raw) == "" {
+		return -1
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || v < 0 {
+		return -1
+	}
+	return v
+}
+
+func pathWithinBase(base, candidate string) bool {
+	base = filepath.Clean(base)
+	candidate = filepath.Clean(candidate)
+	if strings.EqualFold(base, candidate) {
+		return true
+	}
+	baseWithSep := base
+	if !strings.HasSuffix(baseWithSep, string(os.PathSeparator)) {
+		baseWithSep += string(os.PathSeparator)
+	}
+	return strings.HasPrefix(strings.ToLower(candidate), strings.ToLower(baseWithSep))
+}
+
+func truncateRuntimeLogLine(line string) string {
+	if len(line) <= runtimeLogMaxLineChars {
+		return line
+	}
+	return line[:runtimeLogMaxLineChars] + " ...[truncated]"
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

@@ -13,6 +13,7 @@
   - `partial`（局部替换）：仅覆盖上传包内文件，不删除目标目录其他文件，适合增量发版。
 - 回滚流程：基于历史备份包恢复，支持替换忽略规则。
 - 实时日志：SSE 推送部署日志。
+- 项目运行日志查看：自动扫描 `target_dir` 下最可能的日志目录，支持固定日志目录、尾部查看大文件、以及 `<= 50MB` 日志下载。
 - 部署记录：分页懒加载（避免一次性渲染大量记录导致卡顿）。
 - 配置热更新：保存后自动刷新运行配置（`listen_addr` 变更需重启进程）。
 
@@ -59,7 +60,7 @@ echo -n "你的密钥" | openssl dgst -sha256
 ## 配置说明（核心）
 
 - 系统级：`listen_addr`、`session_cookie`、`auth_key_sha256`、`upload_dir`、`work_dir`、`backup_dir`、`deployments_file`、`log_file`。
-- 程序级（`projects[]`）：`id`、`name`、`service_name`、`service_restart_enabled`、`service_restart_cron`、`target_dir`、`current_version`、`max_upload_mb`、`default_replace_mode`、`allow_initial_deploy`、`service_install_mode`、`service_exe_path`、`service_args`、`service_display_name`、`service_description`、`service_start_type`、`reverse_proxy_enabled`、`reverse_proxy_bind_ip`、`reverse_proxy_rules`、`backup_ignore`、`replace_ignore`。
+- 程序级（`projects[]`）：`id`、`name`、`service_name`、`service_restart_enabled`、`service_restart_cron`、`target_dir`、`current_version`、`max_upload_mb`、`default_replace_mode`、`allow_initial_deploy`、`service_install_mode`、`service_exe_path`、`service_args`、`service_display_name`、`service_description`、`service_start_type`、`reverse_proxy_enabled`、`reverse_proxy_bind_ip`、`reverse_proxy_rules`、`runtime_log_dir`、`backup_ignore`、`replace_ignore`。
 - 系统级补充：`nssm_exe_path`（可选，指定 `nssm.exe` 路径；支持相对路径。相对路径按服务程序所在目录解析；留空则优先尝试程序目录下的 `nssm.exe`，再尝试从 PATH 查找）。
 - `service_name` 可为空：为空时部署/回滚将跳过服务启停，仅进行文件替换。
 
@@ -88,6 +89,15 @@ echo -n "你的密钥" | openssl dgst -sha256
   - `remote_port`：远端服务器端口
 - 保存当前程序配置后，主进程会自动启动或重启对应的反代子进程，使新规则立即生效。
 - 反代由 `updater.exe` 自己托管，不依赖额外的代理服务，也不会改写业务程序的服务安装配置。
+
+### 项目运行日志查看
+
+- `runtime_log_dir`：可选，指定某个项目的固定日志目录，路径相对 `target_dir`，例如 `logs` 或 `runtime/logs`。
+- 留空时，页面会在 `target_dir` 内自动扫描最可能的日志目录，优先识别目录名包含 `log`、`logs`、`logger`、`trace`、`runtime` 的目录。
+- 仅显示常见日志文件：`.log`、`.txt`、`.out`、`.err`，以及常见 `.log.1` 轮转日志。
+- 在线查看采用“最后 200/500 行 + 加载更早内容”的方式，不会整文件读入内存，适合大日志文件排障。
+- 日志下载限制：文件大小 `<= 50MB` 时允许直接下载；超过 `50MB` 时仅支持在线查看。
+- 所有日志目录和文件访问都限制在当前项目 `target_dir` 范围内，不能跨目录读取系统其他文件。
 
 ### 部署时替换策略
 

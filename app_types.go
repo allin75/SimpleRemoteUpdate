@@ -59,6 +59,7 @@ type ManagedProject struct {
 	ReverseProxyEnabled   bool               `json:"reverse_proxy_enabled"`
 	ReverseProxyBindIP    string             `json:"reverse_proxy_bind_ip"`
 	ReverseProxyRules     []ReverseProxyRule `json:"reverse_proxy_rules"`
+	RuntimeLogDir         string             `json:"runtime_log_dir"`
 	BackupIgnore          []string           `json:"backup_ignore"`
 	ReplaceIgnore         []string           `json:"replace_ignore"`
 	MaxUploadMB           int64              `json:"max_upload_mb"`

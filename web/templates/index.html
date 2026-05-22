@@ -205,6 +205,11 @@
               max_upload_mb
               <input name="max_upload_mb" type="number" min="1" step="1" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
             </label>
+            <label class="block text-sm md:col-span-2 xl:col-span-3">
+              runtime_log_dir（可选，固定运行日志目录，相对 target_dir）
+              <input name="runtime_log_dir" placeholder="例如 logs 或 runtime/logs" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono" />
+              <span class="mt-1 block text-xs text-slate-500">留空时系统会自动扫描 target_dir 下最可能的日志目录；填写后将优先使用该目录。</span>
+            </label>
             <label class="block text-sm">
               default_replace_mode
               <select name="default_replace_mode" class="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm">
@@ -708,6 +713,7 @@
       <div class="project-info-tabbar">
         <button id="project-info-tab-files" type="button" class="project-info-tab is-active">项目文件</button>
         <button id="project-info-tab-note" type="button" class="project-info-tab">项目备注</button>
+        <button id="project-info-tab-logs" type="button" class="project-info-tab">运行日志</button>
       </div>
     </div>
     <div class="project-info-shell p-5">
@@ -811,6 +817,68 @@
             <span id="project-info-note-msg" class="project-info-inline-msg"></span>
           </div>
         </section>
+      </div>
+
+      <div id="project-info-panel-logs" class="project-info-panel hidden">
+        <div class="project-info-logs-layout">
+          <section class="project-info-log-sidebar">
+            <div class="project-info-card-head">
+              <div>
+                <h4 class="project-info-card-title">日志目录</h4>
+                <p class="project-info-card-desc">自动发现 target_dir 内最可能的日志目录；也可以把当前目录固定下来，后续直接进入。</p>
+              </div>
+            </div>
+            <div class="project-info-log-actions">
+              <button id="project-info-log-refresh" type="button" class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-100">刷新候选目录</button>
+              <button id="project-info-log-pin-dir" type="button" class="px-3 py-2 rounded-lg border border-amber-300 text-amber-700 text-sm hover:bg-amber-50">固定当前目录</button>
+              <button id="project-info-log-clear-pin" type="button" class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-100">清空固定目录</button>
+            </div>
+            <div id="project-info-log-fixed" class="project-info-log-fixed">固定目录：自动发现</div>
+            <div id="project-info-log-dir-list" class="project-info-log-dir-list"></div>
+            <div id="project-info-log-dir-empty" class="project-info-empty hidden">
+              <div class="project-info-empty__title">未发现候选日志目录</div>
+              <p class="project-info-empty__desc">确认目标程序已经在 target_dir 下输出日志，或在程序配置里填写固定日志目录。</p>
+            </div>
+          </section>
+
+          <section class="project-info-log-viewer">
+            <div class="project-info-card-head">
+              <div>
+                <h4 class="project-info-card-title">日志浏览器</h4>
+                <p id="project-info-log-subtitle" class="project-info-card-desc">先选择日志目录，再选择文件查看最后 200 行。</p>
+              </div>
+              <div class="project-info-log-toolbar">
+                <input id="project-info-log-search-input" type="text" placeholder="搜索当前文件全文" class="px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white" />
+                <button id="project-info-log-search-btn" type="button" class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-100">搜索</button>
+                <button id="project-info-log-tail-200" type="button" class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-100">最后 200 行</button>
+                <button id="project-info-log-tail-500" type="button" class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-100">最后 500 行</button>
+                <button id="project-info-log-load-more" type="button" class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-100">加载更早内容</button>
+                <button id="project-info-log-download" type="button" class="px-3 py-2 rounded-lg border border-emerald-300 text-emerald-700 text-sm hover:bg-emerald-50">下载文件</button>
+              </div>
+            </div>
+            <div class="project-info-log-main">
+              <aside class="project-info-log-file-list-wrap">
+                <div class="project-info-log-file-list__title">文件列表</div>
+                <div id="project-info-log-file-list" class="project-info-log-file-list"></div>
+                <div id="project-info-log-file-empty" class="project-info-empty hidden">
+                  <div class="project-info-empty__title">当前目录没有可读日志文件</div>
+                  <p class="project-info-empty__desc">仅展示 `.log`、`.txt`、`.out`、`.err` 及常见轮转日志文件。</p>
+                </div>
+              </aside>
+              <div class="project-info-log-content-wrap">
+                <div class="project-info-log-meta">
+                  <span id="project-info-log-file-meta">尚未选择日志文件</span>
+                  <span id="project-info-log-download-hint" class="project-info-log-download-hint"></span>
+                </div>
+                <div id="project-info-log-search-results" class="project-info-log-search-results hidden"></div>
+                <pre id="project-info-log-content" class="project-info-log-content">请选择左侧目录和日志文件。</pre>
+              </div>
+            </div>
+            <div class="project-info-note-actions">
+              <span id="project-info-log-msg" class="project-info-inline-msg"></span>
+            </div>
+          </section>
+        </div>
       </div>
     </div>
   </dialog>

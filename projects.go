@@ -34,6 +34,7 @@ func normalizeProjects(cfg *Config) {
 			ReverseProxyEnabled:   false,
 			ReverseProxyBindIP:    defaultReverseProxyBindIP(),
 			ReverseProxyRules:     nil,
+			RuntimeLogDir:         "",
 			BackupIgnore:          append([]string{}, cfg.BackupIgnore...),
 			ReplaceIgnore:         append([]string{}, cfg.ReplaceIgnore...),
 			MaxUploadMB:           cfg.MaxUploadMB,
@@ -75,6 +76,7 @@ func normalizeProjects(cfg *Config) {
 		p.ServiceStartType = normalizeServiceStartType(p.ServiceStartType)
 		p.ReverseProxyBindIP = normalizeReverseProxyBindIP(p.ReverseProxyBindIP)
 		p.ReverseProxyRules = normalizeReverseProxyRules(p.ReverseProxyRules)
+		p.RuntimeLogDir = strings.TrimSpace(p.RuntimeLogDir)
 		applyReverseProxyDefaults(&p)
 		if p.MaxUploadMB <= 0 {
 			p.MaxUploadMB = cfg.MaxUploadMB
@@ -111,6 +113,7 @@ func normalizeProjects(cfg *Config) {
 			ReverseProxyEnabled:   false,
 			ReverseProxyBindIP:    defaultReverseProxyBindIP(),
 			ReverseProxyRules:     nil,
+			RuntimeLogDir:         "",
 			BackupIgnore:          append([]string{}, cfg.BackupIgnore...),
 			ReplaceIgnore:         append([]string{}, cfg.ReplaceIgnore...),
 			MaxUploadMB:           firstInt64(cfg.MaxUploadMB, 1024),
@@ -171,6 +174,7 @@ func getDefaultProject(cfg Config) ManagedProject {
 		ReverseProxyEnabled:   false,
 		ReverseProxyBindIP:    defaultReverseProxyBindIP(),
 		ReverseProxyRules:     nil,
+		RuntimeLogDir:         "",
 		BackupIgnore:          append([]string{}, cfg.BackupIgnore...),
 		ReplaceIgnore:         append([]string{}, cfg.ReplaceIgnore...),
 		MaxUploadMB:           firstInt64(cfg.MaxUploadMB, 1024),

@@ -76,8 +76,10 @@
   const projectInfoSubtitle = document.getElementById("project-info-subtitle");
   const projectInfoTabFiles = document.getElementById("project-info-tab-files");
   const projectInfoTabNote = document.getElementById("project-info-tab-note");
+  const projectInfoTabLogs = document.getElementById("project-info-tab-logs");
   const projectInfoPanelFiles = document.getElementById("project-info-panel-files");
   const projectInfoPanelNote = document.getElementById("project-info-panel-note");
+  const projectInfoPanelLogs = document.getElementById("project-info-panel-logs");
   const projectInfoFileInput = document.getElementById("project-info-file-input");
   const projectInfoFileRemark = document.getElementById("project-info-file-remark");
   const projectInfoUploadBtn = document.getElementById("project-info-upload-btn");
@@ -103,6 +105,26 @@
   const projectInfoNoteView = document.getElementById("project-info-note-view");
   const projectInfoNoteEmpty = document.getElementById("project-info-note-empty");
   const projectInfoNoteEditorWrap = document.getElementById("project-info-note-editor-wrap");
+  const projectInfoLogRefreshBtn = document.getElementById("project-info-log-refresh");
+  const projectInfoLogPinDirBtn = document.getElementById("project-info-log-pin-dir");
+  const projectInfoLogClearPinBtn = document.getElementById("project-info-log-clear-pin");
+  const projectInfoLogFixed = document.getElementById("project-info-log-fixed");
+  const projectInfoLogDirList = document.getElementById("project-info-log-dir-list");
+  const projectInfoLogDirEmpty = document.getElementById("project-info-log-dir-empty");
+  const projectInfoLogSubtitle = document.getElementById("project-info-log-subtitle");
+  const projectInfoLogFileList = document.getElementById("project-info-log-file-list");
+  const projectInfoLogFileEmpty = document.getElementById("project-info-log-file-empty");
+  const projectInfoLogFileMeta = document.getElementById("project-info-log-file-meta");
+  const projectInfoLogDownloadHint = document.getElementById("project-info-log-download-hint");
+  const projectInfoLogContent = document.getElementById("project-info-log-content");
+  const projectInfoLogMsg = document.getElementById("project-info-log-msg");
+  const projectInfoLogSearchInput = document.getElementById("project-info-log-search-input");
+  const projectInfoLogSearchBtn = document.getElementById("project-info-log-search-btn");
+  const projectInfoLogSearchResults = document.getElementById("project-info-log-search-results");
+  const projectInfoLogTail200Btn = document.getElementById("project-info-log-tail-200");
+  const projectInfoLogTail500Btn = document.getElementById("project-info-log-tail-500");
+  const projectInfoLogLoadMoreBtn = document.getElementById("project-info-log-load-more");
+  const projectInfoLogDownloadBtn = document.getElementById("project-info-log-download");
 
   const activeProjectStorageKey = "updater.activeProjectId";
 
@@ -685,6 +707,7 @@
       reverse_proxy_enabled: project?.reverse_proxy_enabled ? "true" : "false",
       reverse_proxy_bind_ip: project?.reverse_proxy_bind_ip || "0.0.0.0",
       reverse_proxy_rules_json: JSON.stringify(Array.isArray(project?.reverse_proxy_rules) ? project.reverse_proxy_rules : []),
+      runtime_log_dir: project?.runtime_log_dir || "",
       backup_ignore_text: Array.isArray(project?.backup_ignore) ? project.backup_ignore.join("\n") : "",
       replace_ignore_text: Array.isArray(project?.replace_ignore) ? project.replace_ignore.join("\n") : "",
     };
@@ -1683,6 +1706,15 @@
   let currentProjectInfoId = null;
   let currentProjectInfoNoteHTML = "";
   let projectInfoNoteEditing = false;
+  let projectInfoLogState = {
+    fixedDir: "",
+    selectedDir: "",
+    selectedFile: "",
+    lineMode: 200,
+    nextCursor: -1,
+    hasMore: false,
+    downloadable: false,
+  };
 
   function normalizeProjectInfoNoteHTML(html) {
     const raw = `${html || ""}`.trim();
@@ -1803,12 +1835,346 @@
 
   function switchProjectInfoTab(tab) {
     const filesActive = tab === "files";
+    const noteActive = tab === "note";
+    const logsActive = tab === "logs";
     projectInfoPanelFiles?.classList.toggle("hidden", !filesActive);
-    projectInfoPanelNote?.classList.toggle("hidden", filesActive);
+    projectInfoPanelNote?.classList.toggle("hidden", !noteActive);
+    projectInfoPanelLogs?.classList.toggle("hidden", !logsActive);
     projectInfoTabFiles?.classList.toggle("is-active", filesActive);
-    projectInfoTabNote?.classList.toggle("is-active", !filesActive);
-    if (!filesActive) {
+    projectInfoTabNote?.classList.toggle("is-active", noteActive);
+    projectInfoTabLogs?.classList.toggle("is-active", logsActive);
+    if (!noteActive) {
       setProjectInfoNoteEditing(false);
+    }
+    if (logsActive && currentProjectInfoId) {
+      loadProjectRuntimeLogCandidates(currentProjectInfoId);
+    }
+  }
+
+  function resetProjectRuntimeLogState() {
+    projectInfoLogState = {
+      fixedDir: "",
+      selectedDir: "",
+      selectedFile: "",
+      lineMode: 200,
+      nextCursor: -1,
+      hasMore: false,
+      downloadable: false,
+      searchKeyword: "",
+    };
+    if (projectInfoLogDirList) projectInfoLogDirList.innerHTML = "";
+    if (projectInfoLogFileList) projectInfoLogFileList.innerHTML = "";
+    if (projectInfoLogSearchResults) {
+      projectInfoLogSearchResults.innerHTML = "";
+      projectInfoLogSearchResults.classList.add("hidden");
+    }
+    if (projectInfoLogSearchInput) projectInfoLogSearchInput.value = "";
+    projectInfoLogDirEmpty?.classList.add("hidden");
+    projectInfoLogFileEmpty?.classList.add("hidden");
+    if (projectInfoLogContent) projectInfoLogContent.textContent = "请选择左侧目录和日志文件。";
+    if (projectInfoLogSubtitle) projectInfoLogSubtitle.textContent = "先选择日志目录，再选择文件查看最后 200 行。";
+    if (projectInfoLogFileMeta) projectInfoLogFileMeta.textContent = "尚未选择日志文件";
+    if (projectInfoLogDownloadHint) projectInfoLogDownloadHint.textContent = "";
+    if (projectInfoLogFixed) projectInfoLogFixed.textContent = "固定目录：自动发现";
+    setProjectInfoInlineMessage(projectInfoLogMsg, "");
+    updateProjectLogToolbar();
+  }
+
+  function updateProjectLogToolbar() {
+    if (projectInfoLogLoadMoreBtn) {
+      projectInfoLogLoadMoreBtn.disabled = !projectInfoLogState.selectedFile || !projectInfoLogState.hasMore;
+      projectInfoLogLoadMoreBtn.classList.toggle("opacity-50", projectInfoLogLoadMoreBtn.disabled);
+      projectInfoLogLoadMoreBtn.classList.toggle("cursor-not-allowed", projectInfoLogLoadMoreBtn.disabled);
+    }
+    if (projectInfoLogDownloadBtn) {
+      projectInfoLogDownloadBtn.disabled = !projectInfoLogState.selectedFile || !projectInfoLogState.downloadable;
+      projectInfoLogDownloadBtn.classList.toggle("opacity-50", projectInfoLogDownloadBtn.disabled);
+      projectInfoLogDownloadBtn.classList.toggle("cursor-not-allowed", projectInfoLogDownloadBtn.disabled);
+    }
+    if (projectInfoLogTail200Btn) projectInfoLogTail200Btn.classList.toggle("is-active", projectInfoLogState.lineMode === 200);
+    if (projectInfoLogTail500Btn) projectInfoLogTail500Btn.classList.toggle("is-active", projectInfoLogState.lineMode === 500);
+  }
+
+  function renderProjectRuntimeLogCandidates(candidates = []) {
+    if (!projectInfoLogDirList) return;
+    projectInfoLogDirList.innerHTML = "";
+    const list = Array.isArray(candidates) ? candidates : [];
+    projectInfoLogDirEmpty?.classList.toggle("hidden", list.length > 0);
+    list.forEach((item) => {
+      const btn = document.createElement("button");
+      const isActive = item?.rel_path === projectInfoLogState.selectedDir;
+      btn.type = "button";
+      btn.className = `project-info-log-dir-item${isActive ? " is-active" : ""}`;
+      btn.innerHTML = `
+        <div class="project-info-log-dir-item__head">
+          <span class="project-info-log-dir-item__path">${escapeAttr(item?.display_path || item?.rel_path || ".")}</span>
+          ${item?.fixed ? '<span class="project-info-log-dir-item__badge">固定</span>' : ""}
+        </div>
+        <div class="project-info-log-dir-item__meta">文件 ${Number(item?.file_count || 0)} · 评分 ${Number(item?.score || 0)}${item?.latest_file ? ` · 最新 ${escapeAttr(item.latest_file)}` : ""}</div>
+      `;
+      btn.addEventListener("click", () => {
+        projectInfoLogState.selectedDir = item?.rel_path || ".";
+        projectInfoLogState.selectedFile = "";
+        projectInfoLogState.nextCursor = -1;
+        projectInfoLogState.hasMore = false;
+        projectInfoLogState.downloadable = false;
+        renderProjectRuntimeLogCandidates(list);
+        loadProjectRuntimeLogFiles(currentProjectInfoId, projectInfoLogState.selectedDir);
+      });
+      projectInfoLogDirList.appendChild(btn);
+    });
+  }
+
+  function renderProjectRuntimeLogFiles(files = []) {
+    if (!projectInfoLogFileList) return;
+    projectInfoLogFileList.innerHTML = "";
+    const list = Array.isArray(files) ? files : [];
+    projectInfoLogFileEmpty?.classList.toggle("hidden", list.length > 0);
+    list.forEach((file) => {
+      const btn = document.createElement("button");
+      const isActive = file?.rel_path === projectInfoLogState.selectedFile;
+      btn.type = "button";
+      btn.className = `project-info-log-file-item${isActive ? " is-active" : ""}`;
+      btn.innerHTML = `
+        <div class="project-info-log-file-item__name">${escapeAttr(file?.name || "-")}</div>
+        <div class="project-info-log-file-item__meta">${formatBytes(file?.size || 0)} · ${escapeAttr(formatProjectInfoTime(file?.modified_at || ""))}</div>
+      `;
+      btn.addEventListener("click", () => {
+        projectInfoLogState.selectedFile = file?.rel_path || "";
+        projectInfoLogState.nextCursor = -1;
+        projectInfoLogState.hasMore = false;
+        projectInfoLogState.downloadable = Boolean(file?.downloadable);
+        projectInfoLogState.searchKeyword = "";
+        if (projectInfoLogSearchResults) {
+          projectInfoLogSearchResults.innerHTML = "";
+          projectInfoLogSearchResults.classList.add("hidden");
+        }
+        if (projectInfoLogSearchInput) projectInfoLogSearchInput.value = "";
+        renderProjectRuntimeLogFiles(list);
+        loadProjectRuntimeLogContent(currentProjectInfoId, { reset: true });
+      });
+      projectInfoLogFileList.appendChild(btn);
+    });
+  }
+
+  async function loadProjectRuntimeLogCandidates(projectId) {
+    if (!projectId || !projectInfoLogDirList) return;
+    setProjectInfoInlineMessage(projectInfoLogMsg, "正在扫描候选日志目录...", "muted");
+    projectInfoLogDirList.innerHTML = "";
+    projectInfoLogDirEmpty?.classList.add("hidden");
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/runtime-log-candidates`, {
+        credentials: "same-origin",
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        resetProjectRuntimeLogState();
+        setProjectInfoInlineMessage(projectInfoLogMsg, payload.error || "扫描候选日志目录失败", "error");
+        return;
+      }
+      projectInfoLogState.fixedDir = `${payload.fixed_dir || ""}`.trim();
+      if (projectInfoLogFixed) {
+        projectInfoLogFixed.textContent = projectInfoLogState.fixedDir
+          ? `固定目录：${projectInfoLogState.fixedDir}`
+          : "固定目录：自动发现";
+      }
+      const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+      if (!projectInfoLogState.selectedDir && candidates[0]?.rel_path) {
+        projectInfoLogState.selectedDir = candidates[0].rel_path;
+      }
+      renderProjectRuntimeLogCandidates(candidates);
+      if (projectInfoLogState.selectedDir) {
+        await loadProjectRuntimeLogFiles(projectId, projectInfoLogState.selectedDir);
+      } else {
+        renderProjectRuntimeLogFiles([]);
+        if (projectInfoLogContent) projectInfoLogContent.textContent = "未发现候选日志目录。";
+      }
+      setProjectInfoInlineMessage(projectInfoLogMsg, candidates.length ? "候选日志目录已刷新" : "未发现候选日志目录", candidates.length ? "success" : "muted");
+    } catch (_err) {
+      resetProjectRuntimeLogState();
+      setProjectInfoInlineMessage(projectInfoLogMsg, "扫描候选日志目录失败", "error");
+    }
+  }
+
+  async function loadProjectRuntimeLogFiles(projectId, dirRelPath) {
+    if (!projectId || !dirRelPath) return;
+    projectInfoLogState.selectedFile = "";
+    projectInfoLogState.nextCursor = -1;
+    projectInfoLogState.hasMore = false;
+    projectInfoLogState.downloadable = false;
+    updateProjectLogToolbar();
+    if (projectInfoLogSubtitle) {
+      projectInfoLogSubtitle.textContent = `当前目录: ${dirRelPath}，请选择日志文件。`;
+    }
+    if (projectInfoLogContent) projectInfoLogContent.textContent = "正在读取日志文件列表...";
+    try {
+      const url = `/api/projects/${encodeURIComponent(projectId)}/runtime-logs?dir=${encodeURIComponent(dirRelPath)}`;
+      const res = await fetch(url, { credentials: "same-origin" });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        renderProjectRuntimeLogFiles([]);
+        if (projectInfoLogContent) projectInfoLogContent.textContent = payload.error || "读取日志文件列表失败";
+        setProjectInfoInlineMessage(projectInfoLogMsg, payload.error || "读取日志文件列表失败", "error");
+        return;
+      }
+      const files = Array.isArray(payload.files) ? payload.files : [];
+      renderProjectRuntimeLogFiles(files);
+      if (files.length > 0) {
+        projectInfoLogState.selectedFile = files[0].rel_path;
+        projectInfoLogState.downloadable = Boolean(files[0].downloadable);
+        renderProjectRuntimeLogFiles(files);
+        await loadProjectRuntimeLogContent(projectId, { reset: true });
+      } else {
+        if (projectInfoLogContent) projectInfoLogContent.textContent = "当前目录没有可读日志文件。";
+      }
+    } catch (_err) {
+      renderProjectRuntimeLogFiles([]);
+      if (projectInfoLogContent) projectInfoLogContent.textContent = "读取日志文件列表失败。";
+      setProjectInfoInlineMessage(projectInfoLogMsg, "读取日志文件列表失败", "error");
+    }
+  }
+
+  async function loadProjectRuntimeLogContent(projectId, options = {}) {
+    const { reset = false } = options;
+    if (!projectId || !projectInfoLogState.selectedDir || !projectInfoLogState.selectedFile) return;
+    const lines = projectInfoLogState.lineMode === 500 ? 500 : 200;
+    const query = new URLSearchParams({
+      dir: projectInfoLogState.selectedDir,
+      file: projectInfoLogState.selectedFile,
+      lines: `${lines}`,
+    });
+    if (!reset && projectInfoLogState.nextCursor >= 0) {
+      query.set("cursor", `${projectInfoLogState.nextCursor}`);
+    }
+    if (projectInfoLogContent) {
+      projectInfoLogContent.textContent = reset ? "正在读取日志内容..." : "正在加载更早内容...";
+    }
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/runtime-logs?${query.toString()}`, {
+        credentials: "same-origin",
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (projectInfoLogContent) projectInfoLogContent.textContent = payload.error || "读取日志内容失败";
+        setProjectInfoInlineMessage(projectInfoLogMsg, payload.error || "读取日志内容失败", "error");
+        return;
+      }
+      const content = `${payload.content || ""}`;
+      const previous = !reset ? `${projectInfoLogContent?.textContent || ""}` : "";
+      if (projectInfoLogContent) {
+        projectInfoLogContent.textContent = reset ? content || "(日志为空)" : `${content}${previous}`;
+      }
+      projectInfoLogState.nextCursor = Number.isFinite(Number(payload.next_cursor)) ? Number(payload.next_cursor) : -1;
+      projectInfoLogState.hasMore = Boolean(payload.has_more);
+      projectInfoLogState.downloadable = Boolean(payload.downloadable);
+      if (projectInfoLogFileMeta) {
+        projectInfoLogFileMeta.textContent = `${payload.file || projectInfoLogState.selectedFile} · ${formatBytes(payload.size || 0)} · ${formatProjectInfoTime(payload.modified_at || "")}`;
+      }
+      if (projectInfoLogDownloadHint) {
+        projectInfoLogDownloadHint.textContent = projectInfoLogState.downloadable
+          ? "该文件支持下载"
+          : "文件超过 50MB，仅支持在线查看";
+      }
+      if (projectInfoLogSubtitle) {
+        projectInfoLogSubtitle.textContent = `目录: ${payload.dir || projectInfoLogState.selectedDir} · 文件: ${payload.file || projectInfoLogState.selectedFile}`;
+      }
+      updateProjectLogToolbar();
+      setProjectInfoInlineMessage(projectInfoLogMsg, reset ? "日志内容已刷新" : "已加载更早内容", "success");
+    } catch (_err) {
+      if (projectInfoLogContent) projectInfoLogContent.textContent = "读取日志内容失败。";
+      setProjectInfoInlineMessage(projectInfoLogMsg, "读取日志内容失败", "error");
+    }
+  }
+
+  async function saveProjectRuntimeLogFixedDir(projectId, dirValue) {
+    const formData = new FormData();
+    formData.append("runtime_log_dir", `${dirValue || ""}`);
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/runtime-logs/fixed-dir`, {
+      method: "POST",
+      body: formData,
+      credentials: "same-origin",
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(payload.error || "保存固定日志目录失败");
+    }
+    await loadConfig(payload.active_project_id || projectId, true);
+    return payload;
+  }
+
+  function renderProjectRuntimeLogSearchResults(matches = [], total = 0, truncated = false) {
+    if (!projectInfoLogSearchResults) return;
+    projectInfoLogSearchResults.innerHTML = "";
+    const list = Array.isArray(matches) ? matches : [];
+    if (list.length === 0) {
+      projectInfoLogSearchResults.classList.remove("hidden");
+      projectInfoLogSearchResults.innerHTML = `<div class="project-info-log-search-empty">未找到匹配内容</div>`;
+      return;
+    }
+    projectInfoLogSearchResults.classList.remove("hidden");
+    const header = document.createElement("div");
+    header.className = "project-info-log-search-summary";
+    header.textContent = truncated ? `共命中 ${total} 条，仅显示前 ${list.length} 条` : `共命中 ${total} 条`;
+    projectInfoLogSearchResults.appendChild(header);
+    list.forEach((item) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "project-info-log-search-item";
+      btn.innerHTML = `
+        <span class="project-info-log-search-item__line">第 ${Number(item?.line_number || 0)} 行</span>
+        <span class="project-info-log-search-item__text">${escapeAttr(item?.line_text || "")}</span>
+      `;
+      btn.addEventListener("click", () => {
+        if (!projectInfoLogContent) return;
+        const keyword = `${projectInfoLogState.searchKeyword || ""}`.trim();
+        const haystack = `${projectInfoLogContent.textContent || ""}`;
+        const index = keyword ? haystack.toLowerCase().indexOf(keyword.toLowerCase()) : -1;
+        if (index >= 0) {
+          const before = haystack.slice(0, index);
+          const lineNumber = before.split("\n").length;
+          const targetLine = Math.max(lineNumber - 5, 0);
+          const lineHeight = parseFloat(window.getComputedStyle(projectInfoLogContent).lineHeight || "20");
+          projectInfoLogContent.scrollTop = targetLine * lineHeight;
+        }
+      });
+      projectInfoLogSearchResults.appendChild(btn);
+    });
+  }
+
+  async function searchProjectRuntimeLog(projectId) {
+    if (!projectId || !projectInfoLogState.selectedDir || !projectInfoLogState.selectedFile) {
+      setProjectInfoInlineMessage(projectInfoLogMsg, "请先选择日志文件", "error");
+      return;
+    }
+    const keyword = `${projectInfoLogSearchInput?.value || ""}`.trim();
+    if (!keyword) {
+      setProjectInfoInlineMessage(projectInfoLogMsg, "请输入搜索关键词", "error");
+      return;
+    }
+    projectInfoLogState.searchKeyword = keyword;
+    setProjectInfoInlineMessage(projectInfoLogMsg, "正在搜索当前文件...", "muted");
+    if (projectInfoLogSearchResults) {
+      projectInfoLogSearchResults.innerHTML = "";
+      projectInfoLogSearchResults.classList.remove("hidden");
+    }
+    try {
+      const query = new URLSearchParams({
+        dir: projectInfoLogState.selectedDir,
+        file: projectInfoLogState.selectedFile,
+        keyword,
+      });
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/runtime-logs/search?${query.toString()}`, {
+        credentials: "same-origin",
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setProjectInfoInlineMessage(projectInfoLogMsg, payload.error || "搜索失败", "error");
+        return;
+      }
+      renderProjectRuntimeLogSearchResults(payload.matches, Number(payload.total || 0), Boolean(payload.truncated));
+      setProjectInfoInlineMessage(projectInfoLogMsg, `搜索完成，命中 ${Number(payload.total || 0)} 条`, "success");
+    } catch (_err) {
+      setProjectInfoInlineMessage(projectInfoLogMsg, "搜索失败", "error");
     }
   }
 
@@ -1820,8 +2186,10 @@
     }
     currentProjectInfoId = p.id;
     currentProjectInfoNoteHTML = "";
+    resetProjectRuntimeLogState();
     setProjectInfoInlineMessage(projectInfoUploadMsg, "");
     setProjectInfoInlineMessage(projectInfoNoteMsg, "");
+    setProjectInfoInlineMessage(projectInfoLogMsg, "");
     setProjectInfoSelectedFile(null);
     if (projectInfoFileInput) projectInfoFileInput.value = "";
     if (projectInfoFileRemark) projectInfoFileRemark.value = "";
@@ -1951,15 +2319,27 @@
   if (projectInfoClose && projectInfoDialog) {
     projectInfoClose.addEventListener("click", () => closeDialog(projectInfoDialog));
     projectInfoDialog.addEventListener("click", (e) => {
-      const rect = projectInfoDialog.getBoundingClientRect();
-      const inDialog = rect.top <= e.clientY && e.clientY <= rect.top + rect.height &&
-        rect.left <= e.clientX && e.clientX <= rect.left + rect.width;
-      if (!inDialog) closeDialog(projectInfoDialog);
+      if (e.target !== projectInfoDialog) return;
+      const shell = projectInfoDialog.querySelector(".project-info-shell");
+      const header = projectInfoDialog.querySelector(".project-info-header");
+      if (!(shell instanceof HTMLElement) || !(header instanceof HTMLElement)) {
+        closeDialog(projectInfoDialog);
+        return;
+      }
+      const headerRect = header.getBoundingClientRect();
+      const shellRect = shell.getBoundingClientRect();
+      const insideContent =
+        e.clientX >= headerRect.left &&
+        e.clientX <= headerRect.right &&
+        e.clientY >= headerRect.top &&
+        e.clientY <= shellRect.bottom;
+      if (!insideContent) closeDialog(projectInfoDialog);
     });
   }
 
   if (projectInfoTabFiles) projectInfoTabFiles.addEventListener("click", () => switchProjectInfoTab("files"));
   if (projectInfoTabNote) projectInfoTabNote.addEventListener("click", () => switchProjectInfoTab("note"));
+  if (projectInfoTabLogs) projectInfoTabLogs.addEventListener("click", () => switchProjectInfoTab("logs"));
   if (projectInfoNoteEditBtn) projectInfoNoteEditBtn.addEventListener("click", () => setProjectInfoNoteEditing(true));
   if (projectInfoNoteCancelBtn) {
     projectInfoNoteCancelBtn.addEventListener("click", () => {
@@ -2074,6 +2454,101 @@
         projectInfoSaveNoteBtn.disabled = false;
         projectInfoSaveNoteBtn.textContent = "保存备注";
       }
+    });
+  }
+
+  if (projectInfoLogRefreshBtn) {
+    projectInfoLogRefreshBtn.addEventListener("click", () => {
+      if (!currentProjectInfoId) return;
+      loadProjectRuntimeLogCandidates(currentProjectInfoId);
+    });
+  }
+
+  if (projectInfoLogPinDirBtn) {
+    projectInfoLogPinDirBtn.addEventListener("click", async () => {
+      if (!currentProjectInfoId || !projectInfoLogState.selectedDir) {
+        setProjectInfoInlineMessage(projectInfoLogMsg, "请先选择一个日志目录", "error");
+        return;
+      }
+      projectInfoLogPinDirBtn.disabled = true;
+      setProjectInfoInlineMessage(projectInfoLogMsg, "正在保存固定日志目录...", "muted");
+      try {
+        await saveProjectRuntimeLogFixedDir(currentProjectInfoId, projectInfoLogState.selectedDir);
+        await loadProjectRuntimeLogCandidates(currentProjectInfoId);
+        setProjectInfoInlineMessage(projectInfoLogMsg, "固定日志目录已保存", "success");
+      } catch (err) {
+        setProjectInfoInlineMessage(projectInfoLogMsg, err?.message || "保存固定日志目录失败", "error");
+      } finally {
+        projectInfoLogPinDirBtn.disabled = false;
+      }
+    });
+  }
+
+  if (projectInfoLogClearPinBtn) {
+    projectInfoLogClearPinBtn.addEventListener("click", async () => {
+      if (!currentProjectInfoId) return;
+      projectInfoLogClearPinBtn.disabled = true;
+      setProjectInfoInlineMessage(projectInfoLogMsg, "正在清空固定日志目录...", "muted");
+      try {
+        await saveProjectRuntimeLogFixedDir(currentProjectInfoId, "");
+        await loadProjectRuntimeLogCandidates(currentProjectInfoId);
+        setProjectInfoInlineMessage(projectInfoLogMsg, "固定日志目录已清空", "success");
+      } catch (err) {
+        setProjectInfoInlineMessage(projectInfoLogMsg, err?.message || "清空固定日志目录失败", "error");
+      } finally {
+        projectInfoLogClearPinBtn.disabled = false;
+      }
+    });
+  }
+
+  if (projectInfoLogTail200Btn) {
+    projectInfoLogTail200Btn.addEventListener("click", () => {
+      if (!currentProjectInfoId || !projectInfoLogState.selectedFile) return;
+      projectInfoLogState.lineMode = 200;
+      updateProjectLogToolbar();
+      loadProjectRuntimeLogContent(currentProjectInfoId, { reset: true });
+    });
+  }
+
+  if (projectInfoLogTail500Btn) {
+    projectInfoLogTail500Btn.addEventListener("click", () => {
+      if (!currentProjectInfoId || !projectInfoLogState.selectedFile) return;
+      projectInfoLogState.lineMode = 500;
+      updateProjectLogToolbar();
+      loadProjectRuntimeLogContent(currentProjectInfoId, { reset: true });
+    });
+  }
+
+  if (projectInfoLogLoadMoreBtn) {
+    projectInfoLogLoadMoreBtn.addEventListener("click", () => {
+      if (!currentProjectInfoId || !projectInfoLogState.selectedFile || !projectInfoLogState.hasMore) return;
+      loadProjectRuntimeLogContent(currentProjectInfoId, { reset: false });
+    });
+  }
+
+  if (projectInfoLogDownloadBtn) {
+    projectInfoLogDownloadBtn.addEventListener("click", () => {
+      if (!currentProjectInfoId || !projectInfoLogState.selectedDir || !projectInfoLogState.selectedFile || !projectInfoLogState.downloadable) {
+        return;
+      }
+      const url = `/api/projects/${encodeURIComponent(currentProjectInfoId)}/runtime-logs/download?dir=${encodeURIComponent(projectInfoLogState.selectedDir)}&file=${encodeURIComponent(projectInfoLogState.selectedFile)}`;
+      window.open(url, "_blank", "noopener");
+    });
+  }
+
+  if (projectInfoLogSearchBtn) {
+    projectInfoLogSearchBtn.addEventListener("click", () => {
+      if (!currentProjectInfoId) return;
+      searchProjectRuntimeLog(currentProjectInfoId);
+    });
+  }
+
+  if (projectInfoLogSearchInput) {
+    projectInfoLogSearchInput.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      if (!currentProjectInfoId) return;
+      searchProjectRuntimeLog(currentProjectInfoId);
     });
   }
 

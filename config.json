@@ -9,6 +9,9 @@
       "id": "default",
       "name": "fortest",
       "service_name": "fortest",
+      "service_restart_enabled": false,
+      "service_restart_cron": "",
+      "service_restart_time": "",
       "target_dir": "E:\\CompalTest\\SmartAuditForTest",
       "current_version": "1.0.4",
       "default_replace_mode": "full",
@@ -22,6 +25,7 @@
       "reverse_proxy_enabled": false,
       "reverse_proxy_bind_ip": "0.0.0.0",
       "reverse_proxy_rules": null,
+      "runtime_log_dir": "",
       "backup_ignore": [
         "logs/",
         "temp/",
@@ -39,6 +43,9 @@
       "id": "project-1",
       "name": "iotedgevue",
       "service_name": "",
+      "service_restart_enabled": false,
+      "service_restart_cron": "",
+      "service_restart_time": "",
       "target_dir": "E:\\IOTEdge\\Yi.RuoYi.Vue3\\dist",
       "current_version": "0.0.2",
       "default_replace_mode": "full",
@@ -52,6 +59,7 @@
       "reverse_proxy_enabled": false,
       "reverse_proxy_bind_ip": "0.0.0.0",
       "reverse_proxy_rules": null,
+      "runtime_log_dir": "",
       "backup_ignore": [
         "logs/",
         "temp/",
@@ -69,6 +77,9 @@
       "id": "project-2",
       "name": "SmartAudit3",
       "service_name": "MISESmartAudit",
+      "service_restart_enabled": false,
+      "service_restart_cron": "",
+      "service_restart_time": "",
       "target_dir": "E:\\CompalTest\\SmartAuditForTest",
       "current_version": "0.0.2",
       "default_replace_mode": "full",
@@ -90,6 +101,7 @@
           "remote_port": 9090
         }
       ],
+      "runtime_log_dir": "logs",
       "backup_ignore": [
         "logs/",
         "temp/",
@@ -107,6 +119,9 @@
       "id": "gost-proxy",
       "name": "GOST代理",
       "service_name": "gost-proxy",
+      "service_restart_enabled": false,
+      "service_restart_cron": "",
+      "service_restart_time": "",
       "target_dir": "E:\\AutomaticUpdates\\gost-proxy",
       "current_version": "0.0.1",
       "default_replace_mode": "full",
@@ -131,6 +146,7 @@
           "remote_port": 9090
         }
       ],
+      "runtime_log_dir": "",
       "backup_ignore": [
         "logs/",
         "temp/",
